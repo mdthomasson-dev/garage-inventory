@@ -822,8 +822,8 @@ async function settingsView() {
     out.textContent = 'Testing…';
     out.className = 'small';
     try {
-      await ai.testKey();
-      out.textContent = '✅ Key works!';
+      const model = await ai.testKey();
+      out.textContent = `✅ Key works! Using ${model}.`;
       out.className = 'small ok';
     } catch (err) {
       out.textContent = `❌ ${err.message}`;

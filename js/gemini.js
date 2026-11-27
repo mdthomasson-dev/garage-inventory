@@ -2,25 +2,41 @@
 import { settings, DEFAULT_MODEL } from './settings.js';
 import { blobToBase64 } from './image.js';
 
-const endpoint = (model) =>
-  `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
+const BASE = 'https://generativelanguage.googleapis.com/v1beta/models/';
+const modelName = () => (settings.model || DEFAULT_MODEL).replace(/^models\//, '');
 
 export const hasKey = () => Boolean(settings.apiKey);
 
-async function generate(body) {
+/** fetch() with a time limit, so a stuck request shows an error instead of spinning forever. */
+async function call(url, init, seconds) {
   if (!settings.apiKey) throw new Error('Add your Gemini API key in Settings first.');
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), seconds * 1000);
   let res;
   try {
-    res = await fetch(endpoint(settings.model || DEFAULT_MODEL), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': settings.apiKey },
-      body: JSON.stringify(body),
-    });
-  } catch {
+    res = await fetch(url, { ...init, headers: { ...(init.headers || {}), 'x-goog-api-key': settings.apiKey }, signal: ctrl.signal });
+  } catch (e) {
+    if (e.name === 'AbortError') throw new Error(`Gemini didn't answer within ${seconds} seconds. Try again, or try a different model in Settings.`);
     throw new Error("Couldn't reach Gemini. Check your internet connection.");
+  } finally {
+    clearTimeout(timer);
   }
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error?.message || `Gemini returned an error (${res.status}).`);
+  if (!res.ok) {
+    const msg = data.error?.message || `Gemini returned an error (${res.status}).`;
+    if (/api key not valid/i.test(msg)) throw new Error('Google says this API key is not valid. Copy it again from aistudio.google.com/apikey.');
+    if (res.status === 404) throw new Error(`Gemini doesn't recognise the model "${modelName()}". Clear the Model box in Settings to use the default.`);
+    throw new Error(msg);
+  }
+  return data;
+}
+
+async function generate(body, seconds = 90) {
+  const data = await call(`${BASE}${encodeURIComponent(modelName())}:generateContent`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  }, seconds);
   const cand = data.candidates?.[0];
   const text = (cand?.content?.parts || []).map((p) => p.text || '').join('');
   if (!text) {
@@ -40,8 +56,10 @@ function parseJson(text) {
   }
 }
 
+/** Checks the key and model with Google without generating anything (quick and free). */
 export async function testKey() {
-  return generate({ contents: [{ parts: [{ text: 'Reply with the single word OK.' }] }] });
+  const info = await call(`${BASE}${encodeURIComponent(modelName())}`, { method: 'GET' }, 20);
+  return info.displayName || modelName();
 }
 
 /** Looks at a photo of a box's contents and lists the items it can see. */

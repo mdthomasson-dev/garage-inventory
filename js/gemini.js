@@ -25,18 +25,43 @@ async function call(url, init, seconds) {
   if (!res.ok) {
     const msg = data.error?.message || `Gemini returned an error (${res.status}).`;
     if (/api key not valid/i.test(msg)) throw new Error('Google says this API key is not valid. Copy it again from aistudio.google.com/apikey.');
-    if (res.status === 404) throw new Error(`Gemini doesn't recognise the model "${modelName()}". Clear the Model box in Settings to use the default.`);
-    throw new Error(msg);
+    if (res.status === 404) throw Object.assign(new Error(`Gemini doesn't recognise the model "${modelName()}". Clear the Model box in Settings to use the default.`), { status: 404 });
+    throw Object.assign(new Error(msg), { status: res.status, busy: res.status === 503 || res.status === 429 || /high demand|overloaded|unavailable/i.test(msg) });
   }
   return data;
 }
 
+// Used when the chosen model is too busy.
+const FALLBACK_MODEL = 'gemini-flash-lite-latest';
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** Asks Gemini, waiting and retrying when it's busy, then trying the lighter model. */
 async function generate(body, seconds = 90) {
-  const data = await call(`${BASE}${encodeURIComponent(modelName())}:generateContent`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  }, seconds);
+  const send = (model) =>
+    call(`${BASE}${encodeURIComponent(model)}:generateContent`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }, seconds);
+  let data;
+  let lastErr;
+  const attempts = [[modelName(), 0], [modelName(), 2000], [modelName(), 5000]];
+  if (modelName() !== FALLBACK_MODEL) attempts.push([FALLBACK_MODEL, 0]);
+  for (const [model, wait] of attempts) {
+    if (wait) await sleep(wait);
+    try {
+      data = await send(model);
+      break;
+    } catch (e) {
+      lastErr = e;
+      const fallbackMissing = model === FALLBACK_MODEL && e.status === 404;
+      if (!e.busy && !fallbackMissing) throw e;
+    }
+  }
+  if (!data) {
+    if (lastErr?.status === 429) throw new Error("You've hit Gemini's free usage limit for now. Wait a minute (or until tomorrow if it keeps happening) and try again.");
+    throw new Error('Gemini is very busy right now. Please try again in a few minutes.');
+  }
   const cand = data.candidates?.[0];
   const text = (cand?.content?.parts || []).map((p) => p.text || '').join('');
   if (!text) {

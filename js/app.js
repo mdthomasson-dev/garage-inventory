@@ -603,7 +603,14 @@ async function sectionView(id) {
   }
   const [boxes, allPhotos, sections] = await Promise.all([db.allBoxes(), db.allPhotos(), db.allSections()]);
   const secById = new Map(sections.map((x) => [x.id, x]));
-  const here = boxes.filter((b) => b.sectionId === sec.id).sort((a, b) => (a.location || '').localeCompare(b.location || '') || a.code.localeCompare(b.code, undefined, { numeric: true }));
+  const here = boxes
+    .filter((b) => b.sectionId === sec.id)
+    .sort(
+      (a, b) =>
+        !a.location - !b.location || // boxes with a spot first
+        (a.location || '').localeCompare(b.location || '', undefined, { numeric: true }) ||
+        a.code.localeCompare(b.code, undefined, { numeric: true }),
+    );
   const others = boxes.filter((b) => b.sectionId !== sec.id).sort((a, b) => a.code.localeCompare(b.code, undefined, { numeric: true }));
   const firstPhoto = new Map();
   for (const p of allPhotos) if (!firstPhoto.has(p.boxCode)) firstPhoto.set(p.boxCode, p);
@@ -612,21 +619,9 @@ async function sectionView(id) {
     <div class="box-head"><a href="#/" class="back">‹ Boxes</a></div>
     ${sec.photoPath ? '<button class="section-photo" id="sec-photo"><img alt="Photo of this section"></button>' : ''}
     <label class="field"><span>Section name</span><input id="sec-name" value="${esc(sec.name)}" placeholder="e.g. Metal shelves by door"></label>
-    <h2>Boxes here <span class="muted">(${here.length})</span></h2>
-    <div class="cards">
-      ${
-        here.length
-          ? here
-              .map(
-                (b) => `<a class="card" href="#/box/${encodeURIComponent(b.code)}">
-            ${firstPhoto.has(b.code) ? `<img class="thumb" data-code="${esc(b.code)}" alt="">` : '<div class="thumb empty">📦</div>'}
-            <div class="card-body"><div class="code">${esc(b.code)}</div><div class="name">${esc(b.name || 'Unnamed box')}</div>
-            <div class="meta">${b.location ? `${esc(b.location)} · ` : ''}${itemCount(b)} item${itemCount(b) === 1 ? '' : 's'}</div></div></a>`,
-              )
-              .join('')
-          : '<p class="muted">No boxes in this section yet.</p>'
-      }
-    </div>
+    <h2>What's in this section <span class="muted">(${here.length} box${here.length === 1 ? '' : 'es'}, ${here.reduce((n, b) => n + itemCount(b), 0)} items)</span></h2>
+    ${here.length ? '<input id="sec-q" type="search" placeholder="Search this section…" autocomplete="off">' : ''}
+    <div class="cards" id="sec-boxes"></div>
     <div class="row">
       <button class="btn primary" id="new-here">+ New box here</button>
       ${others.length ? '<button class="btn" id="move-here">Move boxes here</button>' : ''}
@@ -635,6 +630,47 @@ async function sectionView(id) {
       <label class="btn">📷 ${sec.photoPath ? 'Retake photo' : 'Add photo'}<input type="file" accept="image/*" capture="environment" class="visually-hidden" id="sec-retake"></label>
       <button class="btn danger" id="sec-del">Delete section</button>
     </div>`;
+
+  /** Each box with its full contents listed, so you can see everything in the section at a glance. */
+  const renderHere = () => {
+    const q = ($('#sec-q')?.value || '').toLowerCase();
+    const terms = q.split(/\s+/).filter(Boolean);
+    const matches = (t) => terms.every((w) => t.includes(w));
+    const MAX = 12;
+    let html = '';
+    for (const b of here) {
+      let items = b.items || [];
+      if (terms.length) {
+        const boxHit = matches([b.code, b.name, b.location, b.notes].join(' ').toLowerCase());
+        const hits = items.filter((i) => matches([i.name, i.category].join(' ').toLowerCase()));
+        if (!boxHit && !hits.length) continue;
+        if (!boxHit) items = hits;
+      }
+      const shown = terms.length ? items : items.slice(0, MAX);
+      const more = items.length - shown.length;
+      html += `<a class="card contents-card" href="#/box/${encodeURIComponent(b.code)}">
+        ${firstPhoto.has(b.code) ? `<img class="thumb" data-code="${esc(b.code)}" alt="">` : '<div class="thumb empty">📦</div>'}
+        <div class="card-body">
+          <div class="code">${esc(b.code)}</div>
+          <div class="name">${esc(b.name || 'Unnamed box')}</div>
+          ${b.location ? `<div class="meta">📍 ${esc(b.location)}</div>` : ''}
+          ${
+            shown.length
+              ? `<ul class="contents">${shown
+                  .map((i) => `<li><span class="muted">${i.qty}×</span> ${terms.length ? `<mark>${esc(i.name)}</mark>` : esc(i.name)}</li>`)
+                  .join('')}${more > 0 ? `<li class="muted">+ ${more} more…</li>` : ''}</ul>`
+              : '<div class="meta">Nothing listed yet</div>'
+          }
+        </div>
+      </a>`;
+    }
+    if (!here.length) html = '<p class="muted">No boxes in this section yet.</p>';
+    else if (!html) html = `<p class="muted">Nothing in this section matches “${esc(q)}”.</p>`;
+    $('#sec-boxes').innerHTML = html;
+    view.querySelectorAll('#sec-boxes img.thumb[data-code]').forEach((img) => fillThumb(img, firstPhoto.get(img.dataset.code)));
+  };
+  renderHere();
+  $('#sec-q')?.addEventListener('input', renderHere);
 
   if (sec.photoPath) {
     const img = $('#sec-photo img');
@@ -645,7 +681,6 @@ async function sectionView(id) {
       if (img.src) modal(`<img class="full" src="${img.src}" alt=""><div class="row"><button class="btn" data-close>Close</button></div>`);
     });
   }
-  view.querySelectorAll('img.thumb[data-code]').forEach((img) => fillThumb(img, firstPhoto.get(img.dataset.code)));
 
   $('#sec-name').addEventListener('change', async (e) => {
     try {

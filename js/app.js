@@ -75,6 +75,9 @@ async function fillThumb(img, photo) {
   if (blob && img.isConnected) img.src = objUrl(blob);
 }
 
+/** "Metal shelves · top left" — the section name plus the spot within it. */
+const whereText = (b, sectionsById) => [sectionsById.get(b.sectionId)?.name, b.location].filter(Boolean).join(' · ');
+
 const itemCount = (b) => (b.items || []).reduce((n, i) => n + (Number(i.qty) || 1), 0);
 
 // ---------- router ----------
@@ -82,6 +85,7 @@ const itemCount = (b) => (b.items || []).reduce((n, i) => n + (Number(i.qty) || 
 const routes = [
   [/^#?\/?$/, () => homeView()],
   [/^#\/box\/([^/?]+)$/, (m) => boxView(decodeURIComponent(m[1]))],
+  [/^#\/section\/([^/?]+)$/, (m) => sectionView(decodeURIComponent(m[1]))],
   [/^#\/scan$/, () => scanView()],
   [/^#\/labels(?:\?(.*))?$/, (m) => labelsView(new URLSearchParams(m[1] || ''))],
   [/^#\/ask$/, () => askView()],
@@ -102,7 +106,7 @@ async function router({ keepScroll = false } = {}) {
   for (const [re, fn] of routes) {
     const m = hash.match(re);
     if (!m) continue;
-    const tab = hash.startsWith('#/box') ? '#/' : hash.split('?')[0];
+    const tab = /^#\/(box|section)\//.test(hash) ? '#/' : hash.split('?')[0];
     document.querySelectorAll('.tabs a').forEach((a) => a.classList.toggle('active', a.getAttribute('href') === tab));
     try {
       await fn(m);
@@ -124,13 +128,43 @@ window.addEventListener('hashchange', () => router());
 let lastQuery = '';
 
 async function homeView() {
-  const boxes = (await db.allBoxes()).sort((a, b) => b.updatedAt - a.updatedAt);
+  const [allBoxes, sections] = await Promise.all([db.allBoxes(), db.allSections()]);
+  const boxes = allBoxes.sort((a, b) => b.updatedAt - a.updatedAt);
+  const sectionsById = new Map(sections.map((sec) => [sec.id, sec]));
   view.innerHTML = `
     <div class="toolbar">
       <input id="q" type="search" placeholder="Search boxes and items…" autocomplete="off" value="${esc(lastQuery)}">
       <button class="btn primary" id="new">+ New box</button>
     </div>
+    <div id="sections">
+      <h2 class="strip-title">Sections</h2>
+      <div class="sections-strip">
+        ${sections
+          .map((sec) => {
+            const n = boxes.filter((b) => b.sectionId === sec.id).length;
+            return `<a class="sec-card" href="#/section/${encodeURIComponent(sec.id)}">
+              ${sec.thumbPath ? `<img data-sec="${esc(sec.id)}" alt="">` : '<div class="sec-img empty">🗄️</div>'}
+              <span class="sec-name">${esc(sec.name || 'Unnamed section')}</span>
+              <small>${n} box${n === 1 ? '' : 'es'}</small>
+            </a>`;
+          })
+          .join('')}
+        <label class="sec-card add">
+          <div class="sec-img empty">📷</div>
+          <span class="sec-name">Add section</span>
+          <small>Take a photo</small>
+          <input type="file" accept="image/*" capture="environment" class="visually-hidden" id="add-section">
+        </label>
+      </div>
+    </div>
+    <h2 class="strip-title">Boxes</h2>
     <div id="list" class="cards"></div>`;
+  view.querySelectorAll('img[data-sec]').forEach((img) => fillSectionThumb(img, sectionsById.get(img.dataset.sec)));
+  $('#add-section').addEventListener('change', (e) => {
+    const file = e.target.files[0];
+    e.target.value = '';
+    if (file) addSectionFlow(file);
+  });
 
   const firstPhoto = new Map();
   for (const p of await db.allPhotos()) if (!firstPhoto.has(p.boxCode)) firstPhoto.set(p.boxCode, p);
@@ -144,7 +178,7 @@ async function homeView() {
     for (const b of boxes) {
       let hits = [];
       if (terms.length) {
-        const boxHit = matches([b.code, b.name, b.location, b.notes].join(' ').toLowerCase());
+        const boxHit = matches([b.code, b.name, b.location, b.notes, sectionsById.get(b.sectionId)?.name].join(' ').toLowerCase());
         hits = (b.items || []).filter((i) => matches([i.name, i.category].join(' ').toLowerCase()));
         if (!boxHit && !hits.length) continue;
       }
@@ -155,7 +189,7 @@ async function homeView() {
           <div class="card-body">
             <div class="code">${esc(b.code)}</div>
             <div class="name">${esc(b.name || 'Unnamed box')}</div>
-            <div class="meta">${b.location ? `📍 ${esc(b.location)} · ` : ''}${itemCount(b)} item${itemCount(b) === 1 ? '' : 's'}</div>
+            <div class="meta">${whereText(b, sectionsById) ? `📍 ${esc(whereText(b, sectionsById))} · ` : ''}${itemCount(b)} item${itemCount(b) === 1 ? '' : 's'}</div>
             ${hits.length ? `<div class="hits">Has: ${hits.map((i) => `<mark>${esc(i.name)}</mark>${i.qty > 1 ? ` ×${i.qty}` : ''}`).join(', ')}</div>` : ''}
           </div>
         </a>`;
@@ -164,13 +198,14 @@ async function homeView() {
       html = `<div class="empty-state">
         <div class="big">📦</div>
         <h2>No boxes yet</h2>
-        <p>Tap <b>+ New box</b> to add one, or go to <a href="#/labels">Labels</a> and print a sheet of blank QR labels to stick on your boxes first.</p>
+        <p>Start by snapping a photo of each area of your garage with <b>Add section</b> above. Then tap <b>+ New box</b>, or go to <a href="#/labels">Labels</a> and print a sheet of blank QR labels to stick on your boxes first.</p>
         <p class="muted">Then take photos of what's inside — ${ai.hasKey() ? 'Gemini will list the items for you.' : 'add a Gemini key in <a href="#/settings">Settings</a> and AI will list the items for you.'}</p>
       </div>`;
     } else if (!shown) {
       html = `<p class="muted center">Nothing matches “${esc(lastQuery)}”. ${ai.hasKey() ? `<a href="#/ask">Ask Gemini instead?</a>` : ''}</p>`;
     }
     $('#list').innerHTML = html;
+    $('#sections').hidden = terms.length > 0;
     view.querySelectorAll('img.thumb[data-code]').forEach((img) => fillThumb(img, firstPhoto.get(img.dataset.code)));
   };
 
@@ -212,7 +247,8 @@ async function boxView(code) {
     return;
   }
 
-  const locations = [...new Set((await db.allBoxes()).map((b) => b.location).filter(Boolean))].sort();
+  const [everyBox, sections] = await Promise.all([db.allBoxes(), db.allSections()]);
+  const spots = [...new Set(everyBox.filter((b) => b.sectionId === box.sectionId).map((b) => b.location).filter(Boolean))].sort();
 
   view.innerHTML = `
     <div class="box-head">
@@ -220,8 +256,18 @@ async function boxView(code) {
       <span class="code-badge">${esc(box.code)}</span>
     </div>
     <label class="field"><span>Name</span><input id="name" value="${esc(box.name)}" placeholder="e.g. Christmas lights"></label>
-    <label class="field"><span>Location</span><input id="location" list="locs" value="${esc(box.location)}" placeholder="e.g. Shelf A, top"></label>
-    <datalist id="locs">${locations.map((l) => `<option value="${esc(l)}">`).join('')}</datalist>
+    <label class="field"><span>Section</span>
+      <div class="row tight">
+        <select id="section">
+          <option value="">— No section —</option>
+          ${sections.map((sec) => `<option value="${esc(sec.id)}" ${sec.id === box.sectionId ? 'selected' : ''}>${esc(sec.name || 'Unnamed section')}</option>`).join('')}
+        </select>
+        ${box.sectionId ? `<a class="btn small" href="#/section/${encodeURIComponent(box.sectionId)}">View</a>` : ''}
+      </div>
+    </label>
+    ${sections.length ? '' : '<p class="muted small">Add sections (areas of your garage) from the Boxes tab.</p>'}
+    <label class="field"><span>Spot in section</span><input id="location" list="locs" value="${esc(box.location)}" placeholder="e.g. top shelf, left"></label>
+    <datalist id="locs">${spots.map((l) => `<option value="${esc(l)}">`).join('')}</datalist>
 
     <section>
       <h2>Photos</h2>
@@ -264,6 +310,13 @@ async function boxView(code) {
       return false;
     }
   };
+  $('#section').addEventListener('change', async (e) => {
+    const id = e.target.value || null;
+    if (await change((b) => (b.sectionId = id))) {
+      toast(id ? `Moved to ${sections.find((x) => x.id === id)?.name || 'section'}` : 'Removed from section');
+      router({ keepScroll: true });
+    }
+  });
   for (const f of ['name', 'location', 'notes']) {
     $(`#${f}`).addEventListener('change', (e) => {
       const v = e.target.value.trim();
@@ -484,6 +537,194 @@ async function boxView(code) {
   renderPhotos();
 }
 
+// ---------- sections (areas of the garage) ----------
+
+async function fillSectionThumb(img, sec) {
+  const blob = await db.sectionThumb(sec);
+  if (blob && img.isConnected) img.src = objUrl(blob);
+}
+
+/** Photo first, then a name (Gemini suggests one), then the new section opens. */
+async function addSectionFlow(file) {
+  let blob, thumb;
+  try {
+    blob = await resizeImage(file, 1600);
+    thumb = await resizeImage(file, 480, 0.75);
+  } catch (err) {
+    toast(err.message);
+    return;
+  }
+  const m = modal(`
+    <h2>New section</h2>
+    <img class="full" src="${objUrl(blob)}" alt="">
+    <form id="sec-form">
+      <label class="field"><span>Name</span><input name="name" required placeholder="e.g. Metal shelves by door" autocomplete="off"></label>
+      <p class="muted small" id="sec-hint">${ai.hasKey() ? '✨ Gemini is suggesting a name…' : ''}</p>
+      <div class="row spread">
+        <button class="btn primary">Save section</button>
+        <button class="btn" type="button" data-close>Cancel</button>
+      </div>
+    </form>`);
+  const form = m.el.querySelector('#sec-form');
+  let typed = false;
+  form.name.addEventListener('input', () => (typed = true));
+  if (ai.hasKey()) {
+    ai.suggestSectionName(blob)
+      .then((name) => {
+        if (!m.el.isConnected) return;
+        if (name && !typed) form.name.value = name;
+        m.el.querySelector('#sec-hint').textContent = name ? 'Suggested by Gemini. Change it if you like.' : '';
+      })
+      .catch(() => m.el.isConnected && (m.el.querySelector('#sec-hint').textContent = ''));
+  }
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const btn = form.querySelector('button.primary');
+    btn.disabled = true;
+    btn.textContent = 'Saving…';
+    try {
+      const sec = await db.createSection({ name: form.name.value, blob, thumb });
+      m.close();
+      toast('Section added');
+      go(`#/section/${encodeURIComponent(sec.id)}`);
+    } catch (err) {
+      toast(err.message);
+      btn.disabled = false;
+      btn.textContent = 'Save section';
+    }
+  });
+}
+
+async function sectionView(id) {
+  let sec = await db.getSection(id);
+  if (!sec) {
+    view.innerHTML = `<div class="empty-state"><h2>That section no longer exists</h2><p><a href="#/">Back to boxes</a></p></div>`;
+    return;
+  }
+  const [boxes, allPhotos, sections] = await Promise.all([db.allBoxes(), db.allPhotos(), db.allSections()]);
+  const secById = new Map(sections.map((x) => [x.id, x]));
+  const here = boxes.filter((b) => b.sectionId === sec.id).sort((a, b) => (a.location || '').localeCompare(b.location || '') || a.code.localeCompare(b.code, undefined, { numeric: true }));
+  const others = boxes.filter((b) => b.sectionId !== sec.id).sort((a, b) => a.code.localeCompare(b.code, undefined, { numeric: true }));
+  const firstPhoto = new Map();
+  for (const p of allPhotos) if (!firstPhoto.has(p.boxCode)) firstPhoto.set(p.boxCode, p);
+
+  view.innerHTML = `
+    <div class="box-head"><a href="#/" class="back">‹ Boxes</a></div>
+    ${sec.photoPath ? '<button class="section-photo" id="sec-photo"><img alt="Photo of this section"></button>' : ''}
+    <label class="field"><span>Section name</span><input id="sec-name" value="${esc(sec.name)}" placeholder="e.g. Metal shelves by door"></label>
+    <h2>Boxes here <span class="muted">(${here.length})</span></h2>
+    <div class="cards">
+      ${
+        here.length
+          ? here
+              .map(
+                (b) => `<a class="card" href="#/box/${encodeURIComponent(b.code)}">
+            ${firstPhoto.has(b.code) ? `<img class="thumb" data-code="${esc(b.code)}" alt="">` : '<div class="thumb empty">📦</div>'}
+            <div class="card-body"><div class="code">${esc(b.code)}</div><div class="name">${esc(b.name || 'Unnamed box')}</div>
+            <div class="meta">${b.location ? `${esc(b.location)} · ` : ''}${itemCount(b)} item${itemCount(b) === 1 ? '' : 's'}</div></div></a>`,
+              )
+              .join('')
+          : '<p class="muted">No boxes in this section yet.</p>'
+      }
+    </div>
+    <div class="row">
+      <button class="btn primary" id="new-here">+ New box here</button>
+      ${others.length ? '<button class="btn" id="move-here">Move boxes here</button>' : ''}
+    </div>
+    <div class="row spread">
+      <label class="btn">📷 ${sec.photoPath ? 'Retake photo' : 'Add photo'}<input type="file" accept="image/*" capture="environment" class="visually-hidden" id="sec-retake"></label>
+      <button class="btn danger" id="sec-del">Delete section</button>
+    </div>`;
+
+  if (sec.photoPath) {
+    const img = $('#sec-photo img');
+    db.sectionPhoto(sec)
+      .then((b) => img.isConnected && (img.src = objUrl(b)))
+      .catch(() => fillSectionThumb(img, sec));
+    $('#sec-photo').addEventListener('click', () => {
+      if (img.src) modal(`<img class="full" src="${img.src}" alt=""><div class="row"><button class="btn" data-close>Close</button></div>`);
+    });
+  }
+  view.querySelectorAll('img.thumb[data-code]').forEach((img) => fillThumb(img, firstPhoto.get(img.dataset.code)));
+
+  $('#sec-name').addEventListener('change', async (e) => {
+    try {
+      sec = await db.updateSection(sec.id, { name: e.target.value });
+      toast('Name saved');
+    } catch (err) {
+      toast(err.message);
+    }
+  });
+
+  $('#new-here').addEventListener('click', async (e) => {
+    const btn = e.currentTarget;
+    btn.disabled = true;
+    try {
+      const box = await db.createBox(null, sec.id);
+      askForPersistentStorage();
+      go(`#/box/${encodeURIComponent(box.code)}`);
+    } catch (err) {
+      toast(err.message);
+      btn.disabled = false;
+    }
+  });
+
+  $('#move-here')?.addEventListener('click', () => {
+    const m = modal(`
+      <h2>Move boxes to ${esc(sec.name || 'this section')}</h2>
+      <ul class="pick">${others
+        .map(
+          (b) => `<li><label class="check"><input type="checkbox" value="${esc(b.code)}">
+          <b>${esc(b.code)}</b> ${esc(b.name || 'Unnamed box')} ${whereText(b, secById) ? `<span class="muted">· ${esc(whereText(b, secById))}</span>` : ''}</label></li>`,
+        )
+        .join('')}</ul>
+      <div class="row spread"><button class="btn primary" id="do-move">Move</button><button class="btn" data-close>Cancel</button></div>`);
+    m.el.querySelector('#do-move').addEventListener('click', async (e) => {
+      const codes = [...m.el.querySelectorAll('input:checked')].map((cb) => cb.value);
+      if (!codes.length) return m.close();
+      const btn = e.currentTarget;
+      btn.disabled = true;
+      try {
+        for (const code of codes) await db.updateBox(code, (b) => (b.sectionId = sec.id));
+        m.close();
+        toast(`Moved ${codes.length} box${codes.length === 1 ? '' : 'es'}`);
+        router({ keepScroll: true });
+      } catch (err) {
+        toast(err.message);
+        btn.disabled = false;
+      }
+    });
+  });
+
+  $('#sec-retake').addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    e.target.value = '';
+    if (!file) return;
+    try {
+      toast('Uploading photo…');
+      await db.setSectionPhoto(sec, await resizeImage(file, 1600), await resizeImage(file, 480, 0.75));
+      toast('Photo updated');
+      router({ keepScroll: true });
+    } catch (err) {
+      toast(err.message);
+    }
+  });
+
+  $('#sec-del').addEventListener('click', async () => {
+    const msg = here.length
+      ? `Delete “${sec.name || 'this section'}”? Its ${here.length} box${here.length === 1 ? '' : 'es'} will be kept, just not in any section.`
+      : `Delete “${sec.name || 'this section'}”?`;
+    if (!confirm(msg)) return;
+    try {
+      await db.deleteSection(sec);
+      toast('Section deleted');
+      go('#/');
+    } catch (err) {
+      toast(err.message);
+    }
+  });
+}
+
 // ---------- scanner ----------
 
 async function scanView() {
@@ -582,7 +823,9 @@ async function scanView() {
 // ---------- labels ----------
 
 async function labelsView(params) {
-  const boxes = (await db.allBoxes()).sort((a, b) => a.code.localeCompare(b.code, undefined, { numeric: true }));
+  const [labelBoxes, labelSections] = await Promise.all([db.allBoxes(), db.allSections()]);
+  const boxes = labelBoxes.sort((a, b) => a.code.localeCompare(b.code, undefined, { numeric: true }));
+  const secById = new Map(labelSections.map((x) => [x.id, x]));
   const selected = new Set((params.get('codes') || '').split(',').filter(Boolean));
   let blanks = [];
   let size = localStorage.getItem('label-size') || 'medium';
@@ -609,7 +852,7 @@ async function labelsView(params) {
            <ul class="pick">${boxes
              .map(
                (b) => `<li><label class="check"><input type="checkbox" value="${esc(b.code)}" ${selected.has(b.code) ? 'checked' : ''}>
-               <b>${esc(b.code)}</b> ${esc(b.name || 'Unnamed box')} ${b.location ? `<span class="muted">· ${esc(b.location)}</span>` : ''}</label></li>`,
+               <b>${esc(b.code)}</b> ${esc(b.name || 'Unnamed box')} ${whereText(b, secById) ? `<span class="muted">· ${esc(whereText(b, secById))}</span>` : ''}</label></li>`,
              )
              .join('')}</ul>`
         : ''
@@ -686,7 +929,8 @@ async function labelsView(params) {
 // ---------- ask AI ----------
 
 async function askView() {
-  const boxes = await db.allBoxes();
+  const [boxes, sections] = await Promise.all([db.allBoxes(), db.allSections()]);
+  const secById = new Map(sections.map((x) => [x.id, x]));
   view.innerHTML = `
     <h1>Ask about your stuff</h1>
     <p class="muted">Try “Where are the jumper cables?”, “Which boxes have camping gear?” or “Do I have any spare light bulbs?”</p>
@@ -704,7 +948,7 @@ async function askView() {
     const out = $('#answer');
     out.innerHTML = '<div class="center pad"><div class="spinner"></div></div>';
     try {
-      const { answer, boxCodes } = await ai.askInventory(q, boxes);
+      const { answer, boxCodes } = await ai.askInventory(q, boxes, sections);
       const linked = boxCodes.map((c) => boxes.find((b) => b.code === c)).filter(Boolean);
       out.innerHTML = `
         <div class="answer">${esc(answer).replace(/\n/g, '<br>')}</div>
@@ -712,7 +956,7 @@ async function askView() {
           .map(
             (b) => `<a class="card" href="#/box/${encodeURIComponent(b.code)}"><div class="thumb empty">📦</div><div class="card-body">
               <div class="code">${esc(b.code)}</div><div class="name">${esc(b.name || 'Unnamed box')}</div>
-              <div class="meta">${b.location ? `📍 ${esc(b.location)}` : ''}</div></div></a>`,
+              <div class="meta">${whereText(b, secById) ? `📍 ${esc(whereText(b, secById))}` : ''}</div></div></a>`,
           )
           .join('')}</div>`;
     } catch (err) {
@@ -984,7 +1228,7 @@ function refreshSoon() {
     const a = document.activeElement;
     if (a && view.contains(a) && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName)) return; // don't yank the page while someone's typing
     const h = location.hash || '#/';
-    if (h === '#/' || h.startsWith('#/box/')) router({ keepScroll: true });
+    if (h === '#/' || h.startsWith('#/box/') || h.startsWith('#/section/')) router({ keepScroll: true });
   }, 700);
 }
 

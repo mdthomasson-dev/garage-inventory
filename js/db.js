@@ -115,12 +115,14 @@ let cachePromise;
 function cache() {
   if (!cachePromise) {
     cachePromise = new Promise((resolve, reject) => {
-      const r = indexedDB.open('garage-inventory-cache', 1);
+      const r = indexedDB.open('garage-inventory-cache', 2);
       r.onupgradeneeded = () => {
         const db = r.result;
-        db.createObjectStore('boxes', { keyPath: 'code' });
-        db.createObjectStore('photos', { keyPath: 'id' }).createIndex('boxCode', 'boxCode');
-        db.createObjectStore('blobs');
+        const has = (n) => db.objectStoreNames.contains(n);
+        if (!has('boxes')) db.createObjectStore('boxes', { keyPath: 'code' });
+        if (!has('photos')) db.createObjectStore('photos', { keyPath: 'id' }).createIndex('boxCode', 'boxCode');
+        if (!has('blobs')) db.createObjectStore('blobs');
+        if (!has('sections')) db.createObjectStore('sections', { keyPath: 'id' });
       };
       r.onsuccess = () => resolve(r.result);
       r.onerror = () => reject(r.error);
@@ -154,7 +156,8 @@ const cacheReplace = (store, values) =>
   });
 async function clearCache() {
   try {
-    await tx(['boxes', 'photos', 'blobs'], 'readwrite', (t) => ['boxes', 'photos', 'blobs'].forEach((s) => t.objectStore(s).clear()));
+    const stores = ['boxes', 'photos', 'blobs', 'sections'];
+    await tx(stores, 'readwrite', (t) => stores.forEach((s) => t.objectStore(s).clear()));
   } catch {
     /* ignore */
   }
@@ -168,6 +171,7 @@ const toBox = (r) => ({
   location: r.location || '',
   notes: r.notes || '',
   items: Array.isArray(r.items) ? r.items : [],
+  sectionId: r.section_id || null,
   createdAt: Date.parse(r.created_at),
   updatedAt: Date.parse(r.updated_at),
 });
@@ -177,6 +181,7 @@ const fromBox = (b) => ({
   location: b.location || '',
   notes: b.notes || '',
   items: b.items || [],
+  section_id: b.sectionId || null,
   updated_at: new Date().toISOString(),
 });
 
@@ -218,10 +223,10 @@ export async function getBox(code) {
   );
 }
 
-export async function createBox(code) {
+export async function createBox(code, sectionId = null) {
   return write(async () => {
     const [c] = code ? [code] : await reserveCodes(1);
-    const { data, error } = await sb.from('garage_boxes').insert({ code: c }).select().single();
+    const { data, error } = await sb.from('garage_boxes').insert({ code: c, section_id: sectionId }).select().single();
     if (error && error.code !== '23505') check({ error }); // 23505 = already exists (someone else just set it up)
     const box = data ? toBox(data) : await getBox(c);
     await cachePut('boxes', [box]);
@@ -326,6 +331,130 @@ async function photoBlob(photo, full) {
 export const thumbBlob = (photo) => photoBlob(photo, false).catch(() => null);
 export const fullBlob = (photo) => photoBlob(photo, true);
 
+// ---------- sections (areas of the garage) ----------
+
+const toSection = (r) => ({
+  id: r.id,
+  name: r.name || '',
+  notes: r.notes || '',
+  photoPath: r.photo_path || null,
+  thumbPath: r.thumb_path || null,
+  createdAt: Date.parse(r.created_at),
+  updatedAt: Date.parse(r.updated_at),
+});
+const byName = (a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' });
+
+export async function allSections() {
+  return readThrough(
+    async () => {
+      const { data, error } = await sb.from('garage_sections').select('*');
+      // Before supabase/002_sections.sql has been run, the table doesn't exist yet: show no sections.
+      if (error && (error.code === 'PGRST205' || error.code === '42P01' || /garage_sections/.test(error.message))) return [];
+      const list = check({ data, error }).map(toSection).sort(byName);
+      await cacheReplace('sections', list);
+      return list;
+    },
+    async () => (await cacheGetAll('sections')).sort(byName),
+  );
+}
+
+export async function getSection(id) {
+  return readThrough(
+    async () => {
+      const row = check(await sb.from('garage_sections').select('*').eq('id', id).maybeSingle());
+      if (!row) {
+        await cacheDelete('sections', [id]);
+        return null;
+      }
+      const sec = toSection(row);
+      await cachePut('sections', [sec]);
+      return sec;
+    },
+    () => tx(['sections'], 'readonly', (t) => req(t.objectStore('sections').get(id))),
+  );
+}
+
+/** Uploads a photo and its thumbnail; returns their storage paths. */
+async function uploadPhotoPair(prefix, blob, thumb) {
+  const id = uid();
+  const path = `${prefix}${id}.jpg`;
+  const thumbPath = `${prefix}${id}-thumb.jpg`;
+  const opts = { contentType: 'image/jpeg', upsert: false };
+  check(await sb.storage.from(BUCKET).upload(path, blob, opts));
+  check(await sb.storage.from(BUCKET).upload(thumbPath, thumb, opts));
+  await tx(['blobs'], 'readwrite', (t) => {
+    t.objectStore('blobs').put(blob, `p:${path}`);
+    t.objectStore('blobs').put(thumb, `p:${thumbPath}`);
+  });
+  return { path, thumbPath };
+}
+
+export async function createSection({ name, blob, thumb }) {
+  return write(async () => {
+    const photo = blob ? await uploadPhotoPair('section-', blob, thumb) : {};
+    const row = check(
+      await sb
+        .from('garage_sections')
+        .insert({ name: name.trim(), photo_path: photo.path || null, thumb_path: photo.thumbPath || null })
+        .select()
+        .single(),
+    );
+    const sec = toSection(row);
+    await cachePut('sections', [sec]);
+    return sec;
+  });
+}
+
+export async function updateSection(id, { name, notes }) {
+  return write(async () => {
+    const fields = { updated_at: new Date().toISOString() };
+    if (name != null) fields.name = name.trim();
+    if (notes != null) fields.notes = notes.trim();
+    const sec = toSection(check(await sb.from('garage_sections').update(fields).eq('id', id).select().single()));
+    await cachePut('sections', [sec]);
+    return sec;
+  });
+}
+
+export async function setSectionPhoto(section, blob, thumb) {
+  return write(async () => {
+    const photo = await uploadPhotoPair('section-', blob, thumb);
+    const row = check(
+      await sb
+        .from('garage_sections')
+        .update({ photo_path: photo.path, thumb_path: photo.thumbPath, updated_at: new Date().toISOString() })
+        .eq('id', section.id)
+        .select()
+        .single(),
+    );
+    const old = [section.photoPath, section.thumbPath].filter(Boolean);
+    if (old.length) await sb.storage.from(BUCKET).remove(old); // best effort
+    const sec = toSection(row);
+    await cachePut('sections', [sec]);
+    return sec;
+  });
+}
+
+export async function deleteSection(section) {
+  return write(async () => {
+    const files = [section.photoPath, section.thumbPath].filter(Boolean);
+    if (files.length) check(await sb.storage.from(BUCKET).remove(files));
+    check(await sb.from('garage_sections').delete().eq('id', section.id)); // its boxes become "no section"
+    await cacheDelete('sections', [section.id]);
+  });
+}
+
+async function pathBlob(path) {
+  const key = `p:${path}`;
+  const cached = await tx(['blobs'], 'readonly', (t) => req(t.objectStore('blobs').get(key)));
+  if (cached) return cached;
+  const blob = check(await sb.storage.from(BUCKET).download(path));
+  await tx(['blobs'], 'readwrite', (t) => t.objectStore('blobs').put(blob, key));
+  return blob;
+}
+export const sectionThumb = (sec) => (sec?.thumbPath ? pathBlob(sec.thumbPath).catch(() => null) : Promise.resolve(null));
+export const sectionPhoto = (sec) => pathBlob(sec.photoPath);
+
 // ---------- household settings (shared Gemini key) ----------
 
 export async function getHouseholdSettings() {
@@ -343,6 +472,7 @@ export function subscribe(onChange) {
     .channel('inventory')
     .on('postgres_changes', { event: '*', schema: 'public', table: 'garage_boxes' }, onChange)
     .on('postgres_changes', { event: '*', schema: 'public', table: 'garage_photos' }, onChange)
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'garage_sections' }, onChange)
     .subscribe();
   return () => sb.removeChannel(channel);
 }
@@ -359,17 +489,43 @@ const blobToDataUrl = (blob) =>
 
 export async function exportAll(onProgress = () => {}) {
   const boxes = check(await sb.from('garage_boxes').select('*')).map(toBox);
+  const sections = [];
+  for (const sec of check(await sb.from('garage_sections').select('*')).map(toSection)) {
+    sections.push({
+      id: sec.id,
+      name: sec.name,
+      notes: sec.notes,
+      photo: sec.photoPath ? await blobToDataUrl(await pathBlob(sec.photoPath)) : null,
+      thumb: sec.thumbPath ? await blobToDataUrl(await pathBlob(sec.thumbPath)) : null,
+    });
+  }
   const photos = check(await sb.from('garage_photos').select('*').order('created_at')).map(toPhoto);
   const out = [];
   for (const [i, p] of photos.entries()) {
     onProgress(i + 1, photos.length);
     out.push({ boxCode: p.boxCode, createdAt: p.createdAt, blob: await blobToDataUrl(await fullBlob(p)), thumb: await blobToDataUrl(await photoBlob(p, false)) });
   }
-  return { app: 'garage-inventory', version: 2, exportedAt: new Date().toISOString(), boxes, photos: out };
+  return { app: 'garage-inventory', version: 3, exportedAt: new Date().toISOString(), sections, boxes, photos: out };
 }
 
 export async function importAll(data, onProgress = () => {}) {
   if (data?.app !== 'garage-inventory') throw new Error("That file isn't a Garage Inventory backup.");
+  for (const sec of data.sections || []) {
+    const photo = sec.photo
+      ? await uploadPhotoPair('section-', await (await fetch(sec.photo)).blob(), await (await fetch(sec.thumb || sec.photo)).blob())
+      : {};
+    await write(async () =>
+      check(
+        await sb.from('garage_sections').upsert({
+          id: sec.id,
+          name: sec.name || '',
+          notes: sec.notes || '',
+          photo_path: photo.path || null,
+          thumb_path: photo.thumbPath || null,
+        }),
+      ),
+    );
+  }
   const boxes = data.boxes || [];
   if (boxes.length) {
     await write(async () => check(await sb.from('garage_boxes').upsert(boxes.map(fromBox))));

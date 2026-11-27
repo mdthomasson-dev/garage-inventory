@@ -144,11 +144,38 @@ Also suggest a short name for the box based on what's in it. ${already}`;
   };
 }
 
+/** Suggests a short name for an area of the garage from a photo of it. */
+export async function suggestSectionName(blob) {
+  const data = await blobToBase64(blob);
+  const text = await generate(
+    {
+      contents: [
+        {
+          parts: [
+            { inlineData: { mimeType: blob.type || 'image/jpeg', data } },
+            {
+              text: 'This is a photo of one area of a home garage (for example a shelving unit, a wall, a corner, a workbench or overhead storage). Suggest a short, practical name of 2 to 4 words that a family would use to refer to this area, like "Metal shelves by door" or "Workbench". Describe the storage, not the items.',
+            },
+          ],
+        },
+      ],
+      generationConfig: {
+        responseMimeType: 'application/json',
+        responseSchema: { type: 'OBJECT', properties: { name: { type: 'STRING' } }, required: ['name'] },
+      },
+    },
+    45,
+  );
+  return String(parseJson(text).name || '').trim();
+}
+
 /** Answers a question like "where is my drill?" using the whole inventory as context. */
-export async function askInventory(question, boxes) {
+export async function askInventory(question, boxes, sections = []) {
+  const sectionName = new Map(sections.map((s) => [s.id, s.name]));
   const lines = boxes.map((b) => {
     const items = (b.items || []).map((i) => `${i.name}${i.qty > 1 ? ` (x${i.qty})` : ''}`).join('; ');
-    return `[${b.code}] name: ${b.name || '(unnamed)'} | location: ${b.location || '(unknown)'} | items: ${items || '(none listed)'}${b.notes ? ` | notes: ${b.notes}` : ''}`;
+    const where = [sectionName.get(b.sectionId), b.location].filter(Boolean).join(', ');
+    return `[${b.code}] name: ${b.name || '(unnamed)'} | where in the garage: ${where || '(unknown)'} | items: ${items || '(none listed)'}${b.notes ? ` | notes: ${b.notes}` : ''}`;
   });
   const prompt = `You help someone find things in the storage boxes in their garage. Here is their full inventory, one box per line:
 
@@ -156,7 +183,7 @@ ${lines.join('\n') || '(no boxes yet)'}
 
 Question: ${question}
 
-Answer briefly and practically, naming box codes and locations. If something isn't in the inventory, say so and suggest the most likely box if there is one. Put every box code you mention in "boxCodes".`;
+Answer briefly and practically, naming box codes and where in the garage they are (section and spot). If something isn't in the inventory, say so and suggest the most likely box if there is one. Put every box code you mention in "boxCodes".`;
   const text = await generate({
     contents: [{ parts: [{ text: prompt }] }],
     generationConfig: {

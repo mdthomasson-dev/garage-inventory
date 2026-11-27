@@ -4,6 +4,7 @@ A phone app (installable website) for knowing what's in every box in your garage
 
 - **QR labels** – print labels, stick them on boxes, scan one to open that box.
 - **Photos** – snap what's inside each box.
+- **Sections** – photograph each area of the garage (shelves, wall, workbench…) and assign boxes to it.
 - **AI** – Gemini looks at your photos and lists the items for you, and answers questions like *"where are the jumper cables?"*
 - **Search** – find any item across all boxes instantly.
 - **Shared household** – everyone signs in on their own phone and sees the same boxes and photos, with changes showing up live.
@@ -17,7 +18,8 @@ No server to run and no build step. It's plain HTML/CSS/JavaScript, with [Supaba
 1. In Supabase, create a project (or use an existing one).
 2. Open `supabase/setup.sql`, change the two email addresses at the bottom to the people in your household.
 3. Supabase dashboard → **SQL Editor** → **New query** → paste the whole file → **Run**.
-   This creates the tables, the private `photos` storage bucket, and the security rules.
+   This creates the tables, the private `garage-photos` storage bucket, and the security rules.
+   (Already set up before sections existed? Run `supabase/002_sections.sql` the same way.)
 4. **Authentication → URL Configuration**: set **Site URL** to your app's address (from step 2 below,
    e.g. `https://<your-username>.github.io/garage-inventory/`). This is where confirmation and password-reset emails send people.
 5. **Project Settings → API**: copy the **Project URL** and the **anon** (or **publishable**) key into `js/config.js`.
@@ -52,11 +54,12 @@ The key is shared with your household (stored in Supabase, readable only by memb
 
 ## How to use it
 
-1. **Labels → + Add blank labels** → Print. Stick one on each box.
+1. On the **Boxes** tab, tap **Add section** and photograph each area of the garage. Gemini suggests a name.
+2. **Labels → + Add blank labels** → Print. Stick one on each box.
    (Or create boxes first with **+ New box** and print their labels.)
-2. Scan a label (with the app's **Scan** tab or your normal camera app). A new label asks you to set the box up.
-3. Add a **name** and **location**, then **Take photo** of the contents. Gemini suggests the items — untick anything wrong and tap **Add to box**.
-4. Later: search on the **Boxes** tab, or ask on the **Ask** tab.
+3. Scan a label (with the app's **Scan** tab or your normal camera app). A new label asks you to set the box up.
+4. Add a **name**, pick its **section** and spot, then **Take photo** of the contents. Gemini suggests the items — untick anything wrong and tap **Add to box**.
+5. Later: search on the **Boxes** tab, or ask on the **Ask** tab.
 
 **Printing tips:** use 100% scale and turn off headers/footers. Plain paper under clear packing tape works well, or use full-sheet sticker paper. Three sizes are available (1.5", 2", 3").
 

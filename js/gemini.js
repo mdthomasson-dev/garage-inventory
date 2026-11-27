@@ -39,7 +39,25 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // Listing items in a photo doesn't need long "thinking", which is what makes newer models slow.
 // Different model generations take different settings, so try them in turn and remember what works.
 const THINKING_OPTIONS = [{ thinkingBudget: 0 }, { thinkingLevel: 'minimal' }, { thinkingLevel: 'low' }, null];
-const thinkingChoice = new Map(); // model -> index into THINKING_OPTIONS
+// model -> index into THINKING_OPTIONS; remembered on this phone so rejected settings aren't retried every time.
+const thinkingChoice = new Map(
+  (() => {
+    try {
+      return Object.entries(JSON.parse(localStorage.getItem('gi-thinking') || '{}'));
+    } catch {
+      return [];
+    }
+  })(),
+);
+const rememberThinking = (model, i) => {
+  if (thinkingChoice.get(model) === i) return;
+  thinkingChoice.set(model, i);
+  try {
+    localStorage.setItem('gi-thinking', JSON.stringify(Object.fromEntries(thinkingChoice)));
+  } catch {
+    /* ignore */
+  }
+};
 
 async function sendWithLightThinking(model, body, seconds) {
   for (let i = thinkingChoice.get(model) ?? 0; i < THINKING_OPTIONS.length; i++) {
@@ -51,7 +69,7 @@ async function sendWithLightThinking(model, body, seconds) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(withThinking),
       }, seconds);
-      thinkingChoice.set(model, i);
+      rememberThinking(model, i);
       return data;
     } catch (e) {
       // Google rejected the request while we were sending a thinking setting. Some models reject it
@@ -62,13 +80,20 @@ async function sendWithLightThinking(model, body, seconds) {
   }
 }
 
-/** Asks Gemini quickly: retries when it's busy, and switches to the lighter model when it's busy or slow. */
-async function generate(body, seconds = 60) {
+/**
+ * Asks Gemini: retries when it's busy, and switches models when one is busy or slow.
+ * `fast`: on Automatic, start with the quick Flash-Lite model (fine for "what's in this photo")
+ * and only use the bigger Flash model if Flash-Lite fails.
+ */
+async function generate(body, seconds = 60, { fast = false } = {}) {
   let data;
   let lastErr;
-  const main = modelName();
+  const chosen = modelName();
+  const automatic = chosen === DEFAULT_MODEL;
+  const main = fast && automatic ? FALLBACK_MODEL : chosen;
+  const backup = main === FALLBACK_MODEL ? (automatic ? DEFAULT_MODEL : null) : FALLBACK_MODEL;
   const attempts = [[main, 0], [main, 2000], [main, 5000]];
-  if (main !== FALLBACK_MODEL) attempts.push([FALLBACK_MODEL, 0]);
+  if (backup) attempts.push([backup, 0]);
   for (let i = 0; i < attempts.length; i++) {
     const [model, wait] = attempts[i];
     if (wait) await sleep(wait);
@@ -77,8 +102,9 @@ async function generate(body, seconds = 60) {
       break;
     } catch (e) {
       lastErr = e;
-      const fallbackMissing = model === FALLBACK_MODEL && e.status === 404;
-      if (e.timeout) {
+      const anotherModelLeft = attempts.slice(i + 1).some(([m]) => m !== model);
+      const fallbackMissing = e.status === 404 && anotherModelLeft;
+      if (e.timeout || fallbackMissing) {
         // Too slow: don't wait for it again, go straight to the lighter model.
         while (i + 1 < attempts.length && attempts[i + 1][0] === model) i++;
         continue;
@@ -178,7 +204,7 @@ Also suggest a short name for the box based on what's in it. ${already}`;
         required: ['items'],
       },
     },
-  });
+  }, 60, { fast: true });
   const out = parseJson(text);
   return {
     boxName: String(out.boxName || '').trim(),
@@ -215,6 +241,7 @@ export async function suggestSectionName(blob) {
       },
     },
     45,
+    { fast: true },
   );
   return String(parseJson(text).name || '').trim();
 }

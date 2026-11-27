@@ -52,10 +52,45 @@ function toast(msg, action = null) {
 
 // ---------- Gemini photo jobs that run in the background ----------
 
-const aiJobs = new Map(); // job id -> { id, photoId, boxCode, status: running|done|empty|error, result, error }
-let aiStatusListener = null; // set while a box page is open, so it can redraw its status line
+const aiJobs = new Map(); // job id -> { id, photoId, boxCode, status: running|added|empty|error, result, error, added, bumped }
+let aiStatusListener = null; // set while a box page is open: (boxCode, boxChanged) => redraw
 
-/** Starts Gemini on a photo without blocking the screen; tells you when it's finished. */
+/** Adds Gemini's items to the box (merging with ones already there), remembering what changed for Undo. */
+async function applyAiResult(job) {
+  job.added = [];
+  job.bumped = [];
+  job.namedBox = false;
+  await db.updateBox(job.boxCode, (b) => {
+    for (const p of job.result.items) {
+      const existing = b.items.find((x) => x.name.toLowerCase() === p.name.toLowerCase());
+      if (existing) {
+        existing.qty += p.qty;
+        job.bumped.push({ id: existing.id, qty: p.qty });
+      } else {
+        const it = db.newItem({ name: p.name, qty: p.qty, category: p.category });
+        b.items.push(it);
+        job.added.push(it.id);
+      }
+    }
+    if (!b.name && job.result.boxName) {
+      b.name = job.result.boxName;
+      job.namedBox = true;
+    }
+  });
+}
+
+async function undoAiResult(job) {
+  await db.updateBox(job.boxCode, (b) => {
+    b.items = b.items.filter((i) => !job.added.includes(i.id));
+    for (const x of job.bumped) {
+      const it = b.items.find((i) => i.id === x.id);
+      if (it) it.qty = Math.max(1, it.qty - x.qty);
+    }
+    if (job.namedBox && b.name === job.result.boxName) b.name = '';
+  });
+}
+
+/** Starts Gemini on a photo without blocking the screen; adds what it finds and tells you when it's done. */
 function startIdentify(boxCode, photo, blob, existingItems) {
   if (!ai.hasKey()) {
     toast('Add your Gemini API key in Settings first.');
@@ -67,27 +102,33 @@ function startIdentify(boxCode, photo, blob, existingItems) {
   (async () => {
     try {
       job.result = await ai.identifyItems(blob || (await db.fullBlob(photo)), existingItems || []);
-      job.status = job.result.items.length ? 'done' : 'empty';
+      if (!aiJobs.has(job.id)) return; // dismissed while running
+      if (job.result.items.length) {
+        await applyAiResult(job);
+        job.status = 'added';
+      } else {
+        job.status = 'empty';
+      }
     } catch (err) {
       job.status = 'error';
       job.error = err.message;
     }
-    if (!aiJobs.has(job.id)) return; // dismissed while running
-    navigator.vibrate?.(job.status === 'done' ? [60, 50, 60] : 150);
+    if (!aiJobs.has(job.id)) return;
+    navigator.vibrate?.(job.status === 'added' ? [60, 50, 60] : 150);
     const n = job.result?.items.length || 0;
     const code = boxCode.replace('-', '\u2011'); // non-breaking hyphen keeps "BOX-001" on one line
     const msg =
-      job.status === 'done'
-        ? `✨ Gemini found ${n} item${n === 1 ? '' : 's'} in ${code}`
+      job.status === 'added'
+        ? `✨ Added ${n} item${n === 1 ? '' : 's'} to ${code}`
         : job.status === 'empty'
           ? `Gemini couldn't make out items in that ${code} photo`
           : `Gemini had a problem with a ${code} photo`;
     const onThatBox = location.hash === `#/box/${encodeURIComponent(boxCode)}`;
     if (onThatBox) {
-      aiStatusListener?.(boxCode);
+      aiStatusListener?.(boxCode, true);
       toast(msg);
     } else {
-      toast(msg, { label: job.status === 'done' ? 'Review' : 'Open', href: `#/box/${encodeURIComponent(boxCode)}` });
+      toast(msg, { label: 'View', href: `#/box/${encodeURIComponent(boxCode)}` });
     }
   })();
 }
@@ -511,7 +552,7 @@ async function boxView(code) {
     });
   });
 
-  // --- AI: status of background Gemini jobs for this box, and the review sheet ---
+  // --- AI: status of background Gemini jobs for this box ---
   const renderAiStatus = () => {
     const el = $('#ai-status');
     if (!el) return;
@@ -520,10 +561,10 @@ async function boxView(code) {
       .map((j) => {
         const close = `<button class="icon" data-dismiss="${esc(j.id)}" aria-label="Dismiss">✕</button>`;
         if (j.status === 'running')
-          return `<div class="ai-job"><div class="spinner sm"></div><span>Gemini is looking at your photo… Keep working, you'll get a buzz when it's done.</span>${close}</div>`;
-        if (j.status === 'done') {
+          return `<div class="ai-job"><div class="spinner sm"></div><span>Gemini is looking at your photo… Keep working; the items will be added for you.</span>${close}</div>`;
+        if (j.status === 'added') {
           const n = j.result.items.length;
-          return `<div class="ai-job ready"><span>✨ Found ${n} item${n === 1 ? '' : 's'}</span><button class="btn small primary" data-review="${esc(j.id)}">Review</button>${close}</div>`;
+          return `<div class="ai-job ready"><span>✨ Added ${n} item${n === 1 ? '' : 's'} from your photo</span><button class="btn small" data-undo="${esc(j.id)}">Undo</button>${close}</div>`;
         }
         if (j.status === 'empty')
           return `<div class="ai-job"><span>Gemini couldn't make out any items in one photo. Try one with better light or closer up.</span>${close}</div>`;
@@ -531,13 +572,26 @@ async function boxView(code) {
       })
       .join('');
   };
-  aiStatusListener = (code) => code === box.code && renderAiStatus();
+  /** Re-reads the box after Gemini added items, without disturbing anything you're typing. */
+  const reloadBox = async () => {
+    const fresh = await db.getBox(box.code);
+    if (!fresh) return;
+    box = fresh;
+    renderItems();
+    const nameInput = $('#name');
+    if (nameInput && document.activeElement !== nameInput && !nameInput.value.trim()) nameInput.value = box.name;
+  };
+  aiStatusListener = (code, boxChanged) => {
+    if (code !== box.code) return;
+    renderAiStatus();
+    if (boxChanged) reloadBox();
+  };
   onCleanup(() => (aiStatusListener = null));
 
-  $('#ai-status').addEventListener('click', (e) => {
+  $('#ai-status').addEventListener('click', async (e) => {
     const t = e.target.closest('button');
     if (!t) return;
-    const job = aiJobs.get(t.dataset.review || t.dataset.dismiss || t.dataset.retry);
+    const job = aiJobs.get(t.dataset.undo || t.dataset.dismiss || t.dataset.retry);
     if (!job) return;
     if (t.dataset.dismiss) {
       aiJobs.delete(job.id);
@@ -547,63 +601,21 @@ async function boxView(code) {
       const photo = photos.find((p) => p.id === job.photoId);
       if (photo) startIdentify(box.code, photo, null, box.items);
       else renderAiStatus();
-    } else if (t.dataset.review) {
-      review(job);
+    } else if (t.dataset.undo) {
+      t.disabled = true;
+      try {
+        await undoAiResult(job);
+        aiJobs.delete(job.id);
+        renderAiStatus();
+        await reloadBox();
+        if (job.namedBox && $('#name').value === job.result.boxName) $('#name').value = box.name;
+        toast('Removed what Gemini added');
+      } catch (err) {
+        t.disabled = false;
+        toast(err.message);
+      }
     }
   });
-
-  function review(job) {
-    const result = job.result;
-    const offerName = result.boxName && !box.name && !$('#name').value.trim();
-    const m = modal(`
-      <h2>✨ Found ${result.items.length} item${result.items.length === 1 ? '' : 's'}</h2>
-      <p class="muted small">Untick anything wrong, fix names, then add.</p>
-      ${offerName ? `<label class="check"><input type="checkbox" id="use-name" checked> Name this box “${esc(result.boxName)}”</label>` : ''}
-      <ul class="ai-items">
-        ${result.items
-          .map(
-            (i, n) => `
-          <li>
-            <input type="checkbox" checked data-n="${n}" aria-label="Include">
-            <input class="qty" type="number" min="1" value="${i.qty}" data-qty="${n}" aria-label="Quantity">
-            <input value="${esc(i.name)}" data-name="${n}" aria-label="Name">
-          </li>`,
-          )
-          .join('')}
-      </ul>
-      <div class="row spread">
-        <button class="btn primary" id="ai-add">Add to box</button>
-        <button class="btn" data-close>Later</button>
-      </div>`);
-    m.el.querySelector('#ai-add').addEventListener('click', async (e) => {
-      const btn = e.currentTarget;
-      const el = m.el;
-      const picked = [];
-      result.items.forEach((it, n) => {
-        if (!el.querySelector(`[data-n="${n}"]`).checked) return;
-        const name = el.querySelector(`[data-name="${n}"]`).value.trim();
-        const qty = Math.max(1, Number(el.querySelector(`[data-qty="${n}"]`).value) || 1);
-        if (name) picked.push({ name, qty, category: it.category });
-      });
-      const newName = el.querySelector('#use-name')?.checked ? result.boxName : null;
-      btn.disabled = true;
-      const ok = await change((b) => {
-        for (const p of picked) {
-          const existing = b.items.find((x) => x.name.toLowerCase() === p.name.toLowerCase());
-          if (existing) existing.qty += p.qty;
-          else b.items.push(db.newItem(p));
-        }
-        if (newName && !b.name) b.name = newName;
-      });
-      btn.disabled = false;
-      if (!ok) return;
-      if (newName && !$('#name').value.trim()) $('#name').value = box.name;
-      aiJobs.delete(job.id);
-      renderAiStatus();
-      m.close();
-      toast('Items added');
-    });
-  }
 
   $('#del').addEventListener('click', async () => {
     if (!confirm(`Delete ${box.code}${box.name ? ` (${box.name})` : ''} and all its photos? This can't be undone.`)) return;
@@ -707,7 +719,7 @@ async function sectionView(id) {
     <h2>What's in this section <span class="muted">(${here.length} box${here.length === 1 ? '' : 'es'}, ${here.reduce((n, b) => n + itemCount(b), 0)} items)</span></h2>
     ${here.length ? '<input id="sec-q" type="search" placeholder="Search this section…" autocomplete="off">' : ''}
     <div class="cards" id="sec-boxes"></div>
-    <a class="btn primary big" href="#/scan?section=${encodeURIComponent(sec.id)}">📷 Scan boxes into this section</a>
+    <a class="btn primary big" href="#/scan?section=${encodeURIComponent(sec.id)}">📷 Scan a box into this section</a>
     <div class="row">
       <button class="btn" id="new-here">+ New box here</button>
       ${others.length ? '<button class="btn" id="move-here">Move boxes here</button>' : ''}
@@ -857,19 +869,18 @@ async function scanView(params = new URLSearchParams()) {
     ${
       sec
         ? `<div class="box-head"><a href="${secHref}" class="back">‹ ${esc(sec.name || 'Section')}</a></div>
-           <h1>Scan boxes into “${esc(sec.name || 'this section')}”</h1>`
+           <h1>Scan a box into “${esc(sec.name || 'this section')}”</h1>`
         : '<h1>Scan a label</h1>'
     }
     <div class="scanner"><video playsinline muted autoplay></video><div class="frame"></div></div>
     <p class="muted center" id="status">Starting camera…</p>
-    ${sec ? '<ul class="scanned" id="scanned"></ul>' : ''}
     <form id="manual" class="row">
       <input name="code" placeholder="Or type a code, e.g. BOX-007" autocapitalize="characters" autocomplete="off">
-      <button class="btn">${sec ? 'Add' : 'Go'}</button>
+      <button class="btn">Go</button>
     </form>
     ${
       sec
-        ? `<a class="btn primary big" href="${secHref}">Done</a>`
+        ? `<a class="btn big" href="${secHref}">Cancel</a>`
         : '<p class="muted small center">Your phone\'s normal camera app can scan the labels too — they open straight to the box.</p>'
     }`;
 
@@ -882,48 +893,37 @@ async function scanView(params = new URLSearchParams()) {
     stream?.getTracks().forEach((t) => t.stop());
   });
 
-  // --- what happens with each code ---
-  const done = new Map(); // code -> time handled (section mode)
+  // --- what happens with a scanned code ---
   let busy = false;
-  const addLine = (code, text, cls = '') => {
-    const li = document.createElement('li');
-    li.className = cls;
-    li.innerHTML = `<a href="#/box/${encodeURIComponent(code)}"><b>${esc(code)}</b></a> <span>${esc(text)}</span>`;
-    $('#scanned')?.prepend(li);
-  };
   const handleCode = async (code) => {
     if (!sec) {
       navigator.vibrate?.(60);
       go(`#/box/${encodeURIComponent(code)}`);
       return true; // stop scanning
     }
+    // Section mode: put this box in the section, then go back to the section.
     if (busy) return false;
-    if (done.has(code)) {
-      if (Date.now() - done.get(code) > 3000) status.textContent = `${code} is already done. Scan the next box.`;
-      return false;
-    }
     busy = true;
-    done.set(code, Date.now());
+    status.textContent = `Putting ${code} in ${sec.name || 'this section'}…`;
     try {
       const existing = await db.getBox(code);
-      if (!existing) {
-        await db.createBox(code, sec.id);
-        addLine(code, 'new box added here ✓', 'ok');
-      } else if (existing.sectionId === sec.id) {
-        addLine(code, `${existing.name || 'Unnamed box'}: already here ✓`);
-      } else {
-        await db.updateBox(code, (b) => (b.sectionId = sec.id));
-        addLine(code, `${existing.name || 'Unnamed box'}: moved here ✓`, 'ok');
-      }
+      if (!existing) await db.createBox(code, sec.id);
+      else if (existing.sectionId !== sec.id) await db.updateBox(code, (b) => (b.sectionId = sec.id));
       navigator.vibrate?.(80);
-      status.textContent = `${done.size} scanned. Point at the next box label, or tap Done.`;
+      toast(
+        !existing
+          ? `${code} added to ${sec.name || 'this section'}`
+          : existing.sectionId === sec.id
+            ? `${code} is already in ${sec.name || 'this section'}`
+            : `${code} moved to ${sec.name || 'this section'}`,
+      );
+      go(secHref);
+      return true;
     } catch (err) {
-      done.delete(code);
-      addLine(code, err.message, 'problem');
-    } finally {
+      status.textContent = err.message;
       busy = false;
+      return false;
     }
-    return false; // keep scanning
   };
 
   $('#manual').addEventListener('submit', async (e) => {
@@ -954,7 +954,7 @@ async function scanView(params = new URLSearchParams()) {
   } catch {
     /* autoplay attr covers it */
   }
-  status.textContent = sec ? 'Point the camera at each box label in turn.' : 'Point the camera at a box label.';
+  status.textContent = sec ? `Point the camera at the label of the box to put in ${sec.name || 'this section'}.` : 'Point the camera at a box label.';
 
   let detector = null;
   try {

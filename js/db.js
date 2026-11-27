@@ -17,7 +17,7 @@ export function getConfig() {
   } catch {
     /* ignore */
   }
-  return { url: url.trim().replace(/\/+$/, ''), key: key.trim(), fromFile: Boolean(SUPABASE_URL && SUPABASE_ANON_KEY) };
+  return { url: url.trim().replace(/\/(rest|auth)\/v1\/?$/, '').replace(/\/+$/, ''), key: key.trim(), fromFile: Boolean(SUPABASE_URL && SUPABASE_ANON_KEY) };
 }
 
 export function saveConfig(url, key) {

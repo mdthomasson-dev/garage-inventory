@@ -4,5 +4,5 @@
 // rules (supabase/setup.sql) are what keep your inventory private.
 //
 // If these are left empty, the app asks for them on first launch instead.
-export const SUPABASE_URL = '';
-export const SUPABASE_ANON_KEY = '';
+export const SUPABASE_URL = 'https://hlfvbeguulgfylrtqgef.supabase.co';
+export const SUPABASE_ANON_KEY = 'sb_publishable_qo5pfd0EB20uOjZoHn9KcA_GQ6m8u6n';

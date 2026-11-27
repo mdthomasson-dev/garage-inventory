@@ -30,12 +30,66 @@ const go = (hash) => {
 export const boxUrl = (code) => `${location.origin}${location.pathname}#/box/${encodeURIComponent(code)}`;
 
 let toastTimer;
-function toast(msg) {
+/** Shows a short message; with `action` ({ label, href }) it stays longer and has a tappable link. */
+function toast(msg, action = null) {
   const t = document.getElementById('toast');
-  t.textContent = msg;
+  t.textContent = '';
+  const span = document.createElement('span');
+  span.textContent = msg;
+  t.appendChild(span);
+  if (action) {
+    const a = document.createElement('a');
+    a.href = action.href;
+    a.textContent = action.label;
+    a.addEventListener('click', () => t.classList.remove('show'));
+    t.appendChild(a);
+  }
+  t.classList.toggle('actionable', Boolean(action));
   t.classList.add('show');
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => t.classList.remove('show'), 2600);
+  toastTimer = setTimeout(() => t.classList.remove('show'), action ? 9000 : 2600);
+}
+
+// ---------- Gemini photo jobs that run in the background ----------
+
+const aiJobs = new Map(); // job id -> { id, photoId, boxCode, status: running|done|empty|error, result, error }
+let aiStatusListener = null; // set while a box page is open, so it can redraw its status line
+
+/** Starts Gemini on a photo without blocking the screen; tells you when it's finished. */
+function startIdentify(boxCode, photo, blob, existingItems) {
+  if (!ai.hasKey()) {
+    toast('Add your Gemini API key in Settings first.');
+    return;
+  }
+  const job = { id: `${photo.id}:${Date.now()}`, photoId: photo.id, boxCode, status: 'running' };
+  aiJobs.set(job.id, job);
+  aiStatusListener?.(boxCode);
+  (async () => {
+    try {
+      job.result = await ai.identifyItems(blob || (await db.fullBlob(photo)), existingItems || []);
+      job.status = job.result.items.length ? 'done' : 'empty';
+    } catch (err) {
+      job.status = 'error';
+      job.error = err.message;
+    }
+    if (!aiJobs.has(job.id)) return; // dismissed while running
+    navigator.vibrate?.(job.status === 'done' ? [60, 50, 60] : 150);
+    const n = job.result?.items.length || 0;
+    const code = boxCode.replace('-', '\u2011'); // non-breaking hyphen keeps "BOX-001" on one line
+    const msg =
+      job.status === 'done'
+        ? `✨ Gemini found ${n} item${n === 1 ? '' : 's'} in ${code}`
+        : job.status === 'empty'
+          ? `Gemini couldn't make out items in that ${code} photo`
+          : `Gemini had a problem with a ${code} photo`;
+    const onThatBox = location.hash === `#/box/${encodeURIComponent(boxCode)}`;
+    if (onThatBox) {
+      aiStatusListener?.(boxCode);
+      toast(msg);
+    } else {
+      toast(msg, { label: job.status === 'done' ? 'Review' : 'Open', href: `#/box/${encodeURIComponent(boxCode)}` });
+    }
+  })();
 }
 
 function modal(html) {
@@ -272,6 +326,7 @@ async function boxView(code) {
     <section>
       <h2>Photos</h2>
       <div class="photos" id="photos"></div>
+      <div id="ai-status"></div>
       <div class="row">
         <label class="btn primary">📷 Take photo<input type="file" accept="image/*" capture="environment" class="visually-hidden" id="cam"></label>
         <label class="btn">🖼️ From library<input type="file" accept="image/*" multiple class="visually-hidden" id="pick"></label>
@@ -408,8 +463,8 @@ async function boxView(code) {
         const photo = await db.addPhoto({ boxCode: box.code, blob, thumb });
         photos.push(photo);
         renderPhotos();
-        // With several photos at once, skip auto-identify so result sheets don't stack up.
-        if (files.length === 1 && ai.hasKey() && settings.autoIdentify) await identify(photo, blob);
+        // Gemini works in the background, so you can keep filling in the rest of the box.
+        if (ai.hasKey() && settings.autoIdentify) startIdentify(box.code, photo, blob, box.items);
       } catch (err) {
         busy.remove();
         toast(err.message || 'Could not add that photo.');
@@ -440,7 +495,7 @@ async function boxView(code) {
       .catch(() => toast("Couldn't load that photo."));
     m.el.querySelector('[data-act=ai]').addEventListener('click', () => {
       m.close();
-      identify(photo);
+      startIdentify(box.code, photo, null, box.items);
     });
     m.el.querySelector('[data-act=del]').addEventListener('click', async () => {
       if (!confirm('Delete this photo?')) return;
@@ -456,28 +511,54 @@ async function boxView(code) {
     });
   });
 
-  // --- AI: identify items in a photo ---
-  async function identify(photo, blob) {
-    if (!ai.hasKey()) {
-      toast('Add your Gemini API key in Settings first.');
-      return;
+  // --- AI: status of background Gemini jobs for this box, and the review sheet ---
+  const renderAiStatus = () => {
+    const el = $('#ai-status');
+    if (!el) return;
+    const jobs = [...aiJobs.values()].filter((j) => j.boxCode === box.code);
+    el.innerHTML = jobs
+      .map((j) => {
+        const close = `<button class="icon" data-dismiss="${esc(j.id)}" aria-label="Dismiss">✕</button>`;
+        if (j.status === 'running')
+          return `<div class="ai-job"><div class="spinner sm"></div><span>Gemini is looking at your photo… Keep working, you'll get a buzz when it's done.</span>${close}</div>`;
+        if (j.status === 'done') {
+          const n = j.result.items.length;
+          return `<div class="ai-job ready"><span>✨ Found ${n} item${n === 1 ? '' : 's'}</span><button class="btn small primary" data-review="${esc(j.id)}">Review</button>${close}</div>`;
+        }
+        if (j.status === 'empty')
+          return `<div class="ai-job"><span>Gemini couldn't make out any items in one photo. Try one with better light or closer up.</span>${close}</div>`;
+        return `<div class="ai-job problem"><span>${esc(j.error)}</span><button class="btn small" data-retry="${esc(j.id)}">Try again</button>${close}</div>`;
+      })
+      .join('');
+  };
+  aiStatusListener = (code) => code === box.code && renderAiStatus();
+  onCleanup(() => (aiStatusListener = null));
+
+  $('#ai-status').addEventListener('click', (e) => {
+    const t = e.target.closest('button');
+    if (!t) return;
+    const job = aiJobs.get(t.dataset.review || t.dataset.dismiss || t.dataset.retry);
+    if (!job) return;
+    if (t.dataset.dismiss) {
+      aiJobs.delete(job.id);
+      renderAiStatus();
+    } else if (t.dataset.retry) {
+      aiJobs.delete(job.id);
+      const photo = photos.find((p) => p.id === job.photoId);
+      if (photo) startIdentify(box.code, photo, null, box.items);
+      else renderAiStatus();
+    } else if (t.dataset.review) {
+      review(job);
     }
-    const m = modal(`<div class="center pad"><div class="spinner"></div><p>Gemini is looking at your photo…</p></div>`);
-    let result;
-    try {
-      result = await ai.identifyItems(blob || (await db.fullBlob(photo)), box.items);
-    } catch (err) {
-      m.el.querySelector('.sheet-panel').innerHTML = `<p class="error">${esc(err.message)}</p><div class="row"><button class="btn" data-close>OK</button></div>`;
-      return;
-    }
-    if (!result.items.length) {
-      m.el.querySelector('.sheet-panel').innerHTML = `<p>Gemini couldn't make out any items in that photo. Try one with better light or closer up.</p><div class="row"><button class="btn" data-close>OK</button></div>`;
-      return;
-    }
-    m.el.querySelector('.sheet-panel').innerHTML = `
+  });
+
+  function review(job) {
+    const result = job.result;
+    const offerName = result.boxName && !box.name && !$('#name').value.trim();
+    const m = modal(`
       <h2>✨ Found ${result.items.length} item${result.items.length === 1 ? '' : 's'}</h2>
       <p class="muted small">Untick anything wrong, fix names, then add.</p>
-      ${!box.name && result.boxName ? `<label class="check"><input type="checkbox" id="use-name" checked> Name this box “${esc(result.boxName)}”</label>` : ''}
+      ${offerName ? `<label class="check"><input type="checkbox" id="use-name" checked> Name this box “${esc(result.boxName)}”</label>` : ''}
       <ul class="ai-items">
         ${result.items
           .map(
@@ -492,9 +573,10 @@ async function boxView(code) {
       </ul>
       <div class="row spread">
         <button class="btn primary" id="ai-add">Add to box</button>
-        <button class="btn" data-close>Cancel</button>
-      </div>`;
+        <button class="btn" data-close>Later</button>
+      </div>`);
     m.el.querySelector('#ai-add').addEventListener('click', async (e) => {
+      const btn = e.currentTarget;
       const el = m.el;
       const picked = [];
       result.items.forEach((it, n) => {
@@ -504,7 +586,7 @@ async function boxView(code) {
         if (name) picked.push({ name, qty, category: it.category });
       });
       const newName = el.querySelector('#use-name')?.checked ? result.boxName : null;
-      e.target.disabled = true;
+      btn.disabled = true;
       const ok = await change((b) => {
         for (const p of picked) {
           const existing = b.items.find((x) => x.name.toLowerCase() === p.name.toLowerCase());
@@ -513,9 +595,11 @@ async function boxView(code) {
         }
         if (newName && !b.name) b.name = newName;
       });
-      e.target.disabled = false;
+      btn.disabled = false;
       if (!ok) return;
-      $('#name').value = box.name;
+      if (newName && !$('#name').value.trim()) $('#name').value = box.name;
+      aiJobs.delete(job.id);
+      renderAiStatus();
       m.close();
       toast('Items added');
     });
@@ -535,6 +619,7 @@ async function boxView(code) {
 
   renderItems();
   renderPhotos();
+  renderAiStatus();
 }
 
 // ---------- sections (areas of the garage) ----------

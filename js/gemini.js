@@ -140,10 +140,18 @@ export async function identifyItems(blob, existingItems = []) {
   const already = existingItems.length
     ? `The box is already known to contain: ${existingItems.map((i) => i.name).join(', ')}. Do not repeat those unless you can see more of them.`
     : '';
-  const prompt = `This is a photo of the contents of a storage box in a home garage.
+  const categories = 'Tools, Electrical, Holiday, Camping, Sports, Automotive, Kitchen, Garden, Paint, Hardware, Toys, Clothing, Documents, Crafts, Other';
+  const prompt =
+    settings.aiDetail === 'detailed'
+      ? `This is a photo of the contents of a storage box in a home garage.
 List each distinct physical item you can see so it can be added to a home inventory.
 Use short, plain, searchable names (e.g. "Cordless drill", "Extension cord, orange", "Christmas lights").
-Group identical items and give a quantity. Give each item a simple category (Tools, Electrical, Holiday, Camping, Sports, Automotive, Kitchen, Garden, Paint, Hardware, Toys, Clothing, Documents, Other).
+Group identical items and give a quantity. Give each item a simple category (${categories}).
+Also suggest a short name for the box based on what's in it. ${already}`
+      : `This is a photo of the contents of a storage box in a home garage.
+Give a quick overview of what's in it: at most 8 entries, each a broad group of similar things described in a few plain, searchable words
+(e.g. "School papers and binders", "Art supplies", "Christmas ornaments", "Power tool batteries"). Don't list every small item.
+Use quantity 1 unless there are clearly several separate big things of one kind. Give each entry a simple category (${categories}).
 Also suggest a short name for the box based on what's in it. ${already}`;
   const text = await generate({
     contents: [{ parts: [{ inlineData: { mimeType: small.type || 'image/jpeg', data } }, { text: prompt }] }],

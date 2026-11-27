@@ -2,7 +2,8 @@ const KEY = 'garage-inventory-settings';
 
 export const DEFAULT_MODEL = 'gemini-flash-latest';
 
-const defaults = { apiKey: '', model: DEFAULT_MODEL, autoIdentify: true };
+// aiDetail: 'overview' = a few broad groups per photo (quick), 'detailed' = every item (slower).
+const defaults = { apiKey: '', model: DEFAULT_MODEL, autoIdentify: true, aiDetail: 'overview' };
 
 function load() {
   try {

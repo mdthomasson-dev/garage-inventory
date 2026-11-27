@@ -1292,6 +1292,12 @@ async function settingsView() {
       </label>
       <p class="muted small" id="model-note">${settings.apiKey ? 'Loading the models your key can use…' : 'Add your key to see the available models.'}</p>
       <label class="check"><input type="checkbox" id="auto" ${settings.autoIdentify ? 'checked' : ''}> Identify items automatically when I add a photo</label>
+      <label class="field"><span>What Gemini lists from a photo</span>
+        <select id="detail">
+          <option value="overview" ${settings.aiDetail !== 'detailed' ? 'selected' : ''}>Quick overview: a few broad groups (faster)</option>
+          <option value="detailed" ${settings.aiDetail === 'detailed' ? 'selected' : ''}>Every item it can see (slower)</option>
+        </select>
+      </label>
       <div class="row"><button class="btn" id="test">Test key</button><span id="test-out" class="small"></span></div>
     </section>
 
@@ -1376,6 +1382,11 @@ async function settingsView() {
     }
   };
   loadModels();
+  $('#detail').addEventListener('change', (e) => {
+    settings.aiDetail = e.target.value;
+    saveSettings();
+    toast(e.target.value === 'detailed' ? 'Gemini will list every item' : 'Gemini will give a quick overview');
+  });
   $('#auto').addEventListener('change', (e) => {
     settings.autoIdentify = e.target.checked;
     saveSettings();

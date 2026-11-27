@@ -823,52 +823,96 @@ async function scanView() {
 // ---------- labels ----------
 
 async function labelsView(params) {
-  const [labelBoxes, labelSections] = await Promise.all([db.allBoxes(), db.allSections()]);
+  const [labelBoxes, labelSections, nextNumber] = await Promise.all([db.allBoxes(), db.allSections(), db.nextCodeNumber()]);
   const boxes = labelBoxes.sort((a, b) => a.code.localeCompare(b.code, undefined, { numeric: true }));
   const secById = new Map(labelSections.map((x) => [x.id, x]));
+  const boxByCode = new Map(boxes.map((b) => [b.code, b]));
   const selected = new Set((params.get('codes') || '').split(',').filter(Boolean));
-  let blanks = [];
+  let blanks = []; // numbers, not yet claimed
   let size = localStorage.getItem('label-size') || 'medium';
+  let next = nextNumber;
 
   view.innerHTML = `
     <h1>Print labels</h1>
-    <p class="muted">Choose boxes to print, or make <b>blank labels</b> to stick on boxes now and fill in later — scanning a blank label lets you set it up.</p>
-    <div class="row">
-      <label class="inline">Label size
-        <select id="size">
-          <option value="small">Small · 1.5 in</option>
-          <option value="medium">Medium · 2 in</option>
-          <option value="large">Large · 3 in</option>
-        </select>
-      </label>
-    </div>
-    <div class="row">
-      <input type="number" id="nblank" min="1" max="100" value="6" class="qty" aria-label="How many blank labels">
-      <button class="btn" id="mkblank">+ Add blank labels</button>
-    </div>
+    <p class="muted">Make <b>blank labels</b> to stick on boxes now and fill in later (scanning one lets you set it up), and/or pick existing boxes to print their labels.</p>
+
+    <section>
+      <h2>Blank labels</h2>
+      <div class="row">
+        <label class="inline">How many <input type="number" id="nblank" min="1" max="200" value="12" class="qty" inputmode="numeric"></label>
+        <label class="inline">Start at <span class="code-prefix">BOX-</span><input type="number" id="start" min="1" max="99999" value="${next}" class="qty" inputmode="numeric"></label>
+      </div>
+      <p class="muted small" id="range-note"></p>
+      <div class="row">
+        <button class="btn primary" id="mkblank">Make labels</button>
+        <button class="btn" id="clrblank" hidden>Remove blank labels</button>
+      </div>
+    </section>
+
     ${
       boxes.length
-        ? `<div class="row"><button class="btn small" id="all">Select all</button><button class="btn small" id="none">Clear</button></div>
-           <ul class="pick">${boxes
-             .map(
-               (b) => `<li><label class="check"><input type="checkbox" value="${esc(b.code)}" ${selected.has(b.code) ? 'checked' : ''}>
-               <b>${esc(b.code)}</b> ${esc(b.name || 'Unnamed box')} ${whereText(b, secById) ? `<span class="muted">· ${esc(whereText(b, secById))}</span>` : ''}</label></li>`,
-             )
-             .join('')}</ul>`
+        ? `<section>
+            <h2>Existing boxes</h2>
+            <div class="row"><button class="btn small" id="all">Select all</button><button class="btn small" id="none">Unselect all</button></div>
+            <ul class="pick">${boxes
+              .map(
+                (b) => `<li><label class="check"><input type="checkbox" value="${esc(b.code)}" ${selected.has(b.code) ? 'checked' : ''}>
+                <b>${esc(b.code)}</b> ${esc(b.name || 'Unnamed box')} ${whereText(b, secById) ? `<span class="muted">· ${esc(whereText(b, secById))}</span>` : ''}</label></li>`,
+              )
+              .join('')}</ul>
+          </section>`
         : ''
     }
-    <button class="btn primary big" id="print">🖨️ Print <span id="n">0</span> labels</button>
-    <p class="muted small">Tip: in the print dialog, turn off headers/footers and set scale to 100%. Plain paper + clear packing tape works great, or print on full-sheet sticker paper.</p>
+
+    <section>
+      <div class="row">
+        <label class="inline">Label size
+          <select id="size">
+            <option value="small">Small · 1.5 in</option>
+            <option value="medium">Medium · 2 in</option>
+            <option value="large">Large · 3 in</option>
+          </select>
+        </label>
+      </div>
+      <div class="row">
+        <button class="btn primary big" id="print">🖨️ Print <span id="n">0</span> labels</button>
+      </div>
+      <div class="row"><button class="btn" id="clear-sheet">🗑️ Clear sheet</button></div>
+      <p class="muted small">Tip: in the print dialog, turn off headers/footers and set scale to 100%. Full-sheet sticker paper or plain paper + clear packing tape both work.</p>
+    </section>
+
     <h2>Preview</h2>
     <div id="print-sheet" class="label-sheet"></div>`;
 
   $('#size').value = size;
-  const boxByCode = new Map(boxes.map((b) => [b.code, b]));
+
+  const readRange = () => {
+    const count = Math.min(200, Math.max(1, Math.floor(Number($('#nblank').value) || 1)));
+    const start = Math.min(99999, Math.max(1, Math.floor(Number($('#start').value) || next)));
+    return { count, start, end: Math.min(99999, start + count - 1) };
+  };
+
+  const describeRange = () => {
+    const { start, end } = readRange();
+    const used = [];
+    for (let n = start; n <= end; n++) {
+      const b = boxByCode.get(db.formatCode(n));
+      if (b) used.push(b);
+    }
+    let note = `${db.formatCode(start)} to ${db.formatCode(end)}.`;
+    if (start !== next) note += ` (Next unused number is ${next}.)`;
+    if (used.length) {
+      note += ` ⚠️ ${used.length === 1 ? `${used[0].code} already belongs to a box` : `${used.length} of these already belong to boxes`} — those labels will open the existing ${used.length === 1 ? 'box' : 'boxes'}.`;
+    }
+    $('#range-note').textContent = note;
+  };
 
   const render = () => {
-    const codes = [...boxes.filter((b) => selected.has(b.code)).map((b) => b.code), ...blanks];
+    const codes = [...boxes.filter((b) => selected.has(b.code)).map((b) => b.code), ...blanks.map(db.formatCode)];
     $('#n').textContent = codes.length;
     $('#print').disabled = !codes.length;
+    $('#clrblank').hidden = !blanks.length;
+    $('#mkblank').textContent = blanks.length ? 'Remake labels' : 'Make labels';
     const sheet = $('#print-sheet');
     sheet.className = `label-sheet ${size}`;
     sheet.innerHTML = codes.length
@@ -882,8 +926,27 @@ async function labelsView(params) {
             </div>`;
           })
           .join('')
-      : '<p class="muted">Nothing selected yet.</p>';
+      : '<p class="muted">Nothing on the sheet yet. Make blank labels or pick boxes above.</p>';
   };
+
+  for (const id of ['nblank', 'start']) $(`#${id}`).addEventListener('input', describeRange);
+
+  $('#mkblank').addEventListener('click', () => {
+    const { start, end } = readRange();
+    blanks = [];
+    for (let n = start; n <= end; n++) blanks.push(n);
+    render();
+  });
+  $('#clrblank').addEventListener('click', () => {
+    blanks = [];
+    render();
+  });
+  $('#clear-sheet').addEventListener('click', () => {
+    blanks = [];
+    selected.clear();
+    view.querySelectorAll('.pick input').forEach((cb) => (cb.checked = false));
+    render();
+  });
 
   view.querySelectorAll('.pick input').forEach((cb) =>
     cb.addEventListener('change', () => {
@@ -898,20 +961,8 @@ async function labelsView(params) {
   });
   $('#none')?.addEventListener('click', () => {
     selected.clear();
-    blanks = [];
     view.querySelectorAll('.pick input').forEach((cb) => (cb.checked = false));
     render();
-  });
-  $('#mkblank').addEventListener('click', async () => {
-    const n = Math.min(100, Math.max(1, Number($('#nblank').value) || 1));
-    try {
-      blanks.push(...(await db.reserveCodes(n)));
-    } catch (err) {
-      toast(err.message);
-      return;
-    }
-    render();
-    toast(`Added ${n} blank label${n === 1 ? '' : 's'}`);
   });
   $('#size').addEventListener('change', (e) => {
     size = e.target.value;
@@ -922,7 +973,27 @@ async function labelsView(params) {
     }
     render();
   });
-  $('#print').addEventListener('click', () => window.print());
+
+  // Numbers are only marked as used when you actually print, so trying different amounts costs nothing.
+  $('#print').addEventListener('click', async (e) => {
+    const btn = e.currentTarget;
+    if (blanks.length) {
+      btn.disabled = true;
+      try {
+        await db.claimCodesThrough(Math.max(...blanks));
+      } catch (err) {
+        btn.disabled = false;
+        if (!confirm(`${err.message}\n\nPrint anyway? (A new box might later get one of these numbers.)`)) return;
+      }
+      btn.disabled = false;
+      next = Math.max(next, Math.max(...blanks) + 1);
+      $('#start').value = next;
+      describeRange();
+    }
+    window.print();
+  });
+
+  describeRange();
   render();
 }
 

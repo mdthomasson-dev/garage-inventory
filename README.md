@@ -19,7 +19,7 @@ No server to run and no build step. It's plain HTML/CSS/JavaScript, with [Supaba
 2. Open `supabase/setup.sql`, change the two email addresses at the bottom to the people in your household.
 3. Supabase dashboard → **SQL Editor** → **New query** → paste the whole file → **Run**.
    This creates the tables, the private `garage-photos` storage bucket, and the security rules.
-   (Already set up before sections existed? Run `supabase/002_sections.sql` the same way.)
+   (Set up before these features existed? Run `supabase/002_sections.sql` and `supabase/003_label_numbers.sql` the same way.)
 4. **Authentication → URL Configuration**: set **Site URL** to your app's address (from step 2 below,
    e.g. `https://<your-username>.github.io/garage-inventory/`). This is where confirmation and password-reset emails send people.
 5. **Project Settings → API**: copy the **Project URL** and the **anon** (or **publishable**) key into `js/config.js`.
@@ -55,7 +55,7 @@ The key is shared with your household (stored in Supabase, readable only by memb
 ## How to use it
 
 1. On the **Boxes** tab, tap **Add section** and photograph each area of the garage. Gemini suggests a name.
-2. **Labels → + Add blank labels** → Print. Stick one on each box.
+2. **Labels → Blank labels**: choose how many and the starting number → **Make labels** → Print. Stick one on each box.
    (Or create boxes first with **+ New box** and print their labels.)
 3. Scan a label (with the app's **Scan** tab or your normal camera app). A new label asks you to set the box up.
 4. Add a **name**, pick its **section** and spot, then **Take photo** of the contents. Gemini suggests the items — untick anything wrong and tap **Add to box**.

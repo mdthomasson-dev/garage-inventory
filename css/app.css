@@ -47,6 +47,7 @@ h2 { font-size: 1.1rem; margin: 0 0 0.6em; }
 .pad { padding: 24px 8px; }
 .error { color: var(--danger); }
 .ok { color: var(--ok); }
+[hidden] { display: none !important; }
 .visually-hidden { position: absolute; width: 1px; height: 1px; opacity: 0; overflow: hidden; }
 
 .topbar {
@@ -241,3 +242,5 @@ body.offline .topbar::after {
 .section-photo img { width: 100%; max-height: 42vh; object-fit: cover; border-radius: var(--radius); display: block; background: var(--bg); min-height: 120px; }
 .row.tight select { flex: 1; }
 .modal .pick { max-height: 50vh; }
+.code-prefix { font: 700 0.9rem ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--muted); margin-right: -4px; }
+.inline .qty { width: 84px; }

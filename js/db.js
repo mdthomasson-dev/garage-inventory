@@ -258,6 +258,36 @@ export async function deleteBox(code) {
   });
 }
 
+const fnMissing = (e) => e?.code === 'PGRST202' || /could not find the function/i.test(e?.message || '');
+export const formatCode = (n) => `BOX-${String(n).padStart(3, '0')}`;
+
+/** The next box number nobody has used yet (doesn't reserve it). */
+export async function nextCodeNumber() {
+  const fromBoxes = async () => {
+    let max = 0;
+    for (const b of await allBoxes()) {
+      const m = /^BOX-(\d+)$/.exec(b.code);
+      if (m) max = Math.max(max, Number(m[1]));
+    }
+    return max + 1;
+  };
+  if (!navigator.onLine) return fromBoxes();
+  const { data, error } = await sb.rpc('garage_next_code_number');
+  if (error) return fromBoxes(); // offline, or supabase/003_label_numbers.sql not run yet
+  return data;
+}
+
+/** Marks numbers up to `last` as used so "+ New box" never hands out a number that's already printed. */
+export async function claimCodesThrough(last) {
+  return write(async () => {
+    const { error } = await sb.rpc('garage_claim_codes_through', { last_number: last });
+    if (error && fnMissing(error)) {
+      throw new Error('One more Supabase step is needed: run supabase/003_label_numbers.sql in the SQL Editor.');
+    }
+    check({ error });
+  });
+}
+
 export async function reserveCodes(n) {
   return write(async () => check(await sb.rpc('garage_reserve_codes', { n })));
 }

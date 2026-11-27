@@ -24,7 +24,7 @@ No server to run and no build step. It's plain HTML/CSS/JavaScript, with [Supaba
    These are meant to be public; the security rules are what protect your data. **Never** use the `service_role`/secret key here.
    (If you leave `config.js` empty, the app asks for them on first launch instead.)
 
-To add someone later, add their email in **Table Editor → household_members**.
+To add someone later, add their email in **Table Editor → garage_members**.
 
 ## 2. Put it online (GitHub Pages, free)
 

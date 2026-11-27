@@ -3,7 +3,7 @@
 // A copy is kept on the phone (IndexedDB) so the app still opens and searches offline.
 import { SUPABASE_URL, SUPABASE_ANON_KEY } from './config.js';
 
-const BUCKET = 'photos';
+const BUCKET = 'garage-photos';
 export let sb = null;
 
 // ---------- connection config ----------
@@ -61,7 +61,7 @@ export async function signOut() {
   await clearCache();
 }
 export async function isMember() {
-  return check(await sb.rpc('is_member')) === true;
+  return check(await sb.rpc('garage_is_member')) === true;
 }
 
 // ---------- online / offline ----------
@@ -202,7 +202,7 @@ export function newItem({ name, qty = 1, category = '' }) {
 export async function allBoxes() {
   return readThrough(
     async () => {
-      const boxes = check(await sb.from('boxes').select('*')).map(toBox);
+      const boxes = check(await sb.from('garage_boxes').select('*')).map(toBox);
       await cacheReplace('boxes', boxes);
       return boxes;
     },
@@ -213,7 +213,7 @@ export async function allBoxes() {
 export async function getBox(code) {
   return readThrough(
     async () => {
-      const row = check(await sb.from('boxes').select('*').eq('code', code).maybeSingle());
+      const row = check(await sb.from('garage_boxes').select('*').eq('code', code).maybeSingle());
       if (!row) {
         await cacheDelete('boxes', [code]);
         return null;
@@ -229,7 +229,7 @@ export async function getBox(code) {
 export async function createBox(code) {
   return write(async () => {
     const [c] = code ? [code] : await reserveCodes(1);
-    const { data, error } = await sb.from('boxes').insert({ code: c }).select().single();
+    const { data, error } = await sb.from('garage_boxes').insert({ code: c }).select().single();
     if (error && error.code !== '23505') check({ error }); // 23505 = already exists (someone else just set it up)
     const box = data ? toBox(data) : await getBox(c);
     await cachePut('boxes', [box]);
@@ -240,10 +240,10 @@ export async function createBox(code) {
 /** Re-reads the box, applies `change`, and saves it — so two people editing don't wipe each other's items. */
 export async function updateBox(code, change) {
   return write(async () => {
-    const row = check(await sb.from('boxes').select('*').eq('code', code).single());
+    const row = check(await sb.from('garage_boxes').select('*').eq('code', code).single());
     const box = toBox(row);
     change(box);
-    const saved = toBox(check(await sb.from('boxes').update(fromBox(box)).eq('code', code).select().single()));
+    const saved = toBox(check(await sb.from('garage_boxes').update(fromBox(box)).eq('code', code).select().single()));
     await cachePut('boxes', [saved]);
     return saved;
   });
@@ -251,10 +251,10 @@ export async function updateBox(code, change) {
 
 export async function deleteBox(code) {
   return write(async () => {
-    const photos = check(await sb.from('photos').select('*').eq('box_code', code));
+    const photos = check(await sb.from('garage_photos').select('*').eq('box_code', code));
     const paths = photos.flatMap((p) => [p.path, p.thumb_path]);
     if (paths.length) check(await sb.storage.from(BUCKET).remove(paths));
-    check(await sb.from('boxes').delete().eq('code', code));
+    check(await sb.from('garage_boxes').delete().eq('code', code));
     await cacheDelete('boxes', [code]);
     await cacheDelete('photos', photos.map((p) => p.id));
     await cacheDelete('blobs', photos.flatMap((p) => [`t:${p.id}`, `f:${p.id}`]));
@@ -262,7 +262,7 @@ export async function deleteBox(code) {
 }
 
 export async function reserveCodes(n) {
-  return write(async () => check(await sb.rpc('reserve_codes', { n })));
+  return write(async () => check(await sb.rpc('garage_reserve_codes', { n })));
 }
 
 // ---------- photos ----------
@@ -272,7 +272,7 @@ const toPhoto = (r) => ({ id: r.id, boxCode: r.box_code, path: r.path, thumbPath
 export async function allPhotos() {
   return readThrough(
     async () => {
-      const photos = check(await sb.from('photos').select('*').order('created_at')).map(toPhoto);
+      const photos = check(await sb.from('garage_photos').select('*').order('created_at')).map(toPhoto);
       await cacheReplace('photos', photos);
       return photos;
     },
@@ -283,7 +283,7 @@ export async function allPhotos() {
 export async function photosFor(boxCode) {
   return readThrough(
     async () => {
-      const photos = check(await sb.from('photos').select('*').eq('box_code', boxCode).order('created_at')).map(toPhoto);
+      const photos = check(await sb.from('garage_photos').select('*').eq('box_code', boxCode).order('created_at')).map(toPhoto);
       await cachePut('photos', photos);
       return photos;
     },
@@ -302,8 +302,8 @@ export async function addPhoto({ boxCode, blob, thumb }) {
     const opts = { contentType: 'image/jpeg', upsert: false };
     check(await sb.storage.from(BUCKET).upload(path, blob, opts));
     check(await sb.storage.from(BUCKET).upload(thumbPath, thumb, opts));
-    const row = check(await sb.from('photos').insert({ id, box_code: boxCode, path, thumb_path: thumbPath }).select().single());
-    await sb.from('boxes').update({ updated_at: new Date().toISOString() }).eq('code', boxCode);
+    const row = check(await sb.from('garage_photos').insert({ id, box_code: boxCode, path, thumb_path: thumbPath }).select().single());
+    await sb.from('garage_boxes').update({ updated_at: new Date().toISOString() }).eq('code', boxCode);
     const photo = toPhoto(row);
     await cachePut('photos', [photo]);
     await tx(['blobs'], 'readwrite', (t) => {
@@ -317,7 +317,7 @@ export async function addPhoto({ boxCode, blob, thumb }) {
 export async function deletePhoto(photo) {
   return write(async () => {
     check(await sb.storage.from(BUCKET).remove([photo.path, photo.thumbPath]));
-    check(await sb.from('photos').delete().eq('id', photo.id));
+    check(await sb.from('garage_photos').delete().eq('id', photo.id));
     await cacheDelete('photos', [photo.id]);
     await cacheDelete('blobs', [`t:${photo.id}`, `f:${photo.id}`]);
   });
@@ -337,11 +337,11 @@ export const fullBlob = (photo) => photoBlob(photo, true);
 // ---------- household settings (shared Gemini key) ----------
 
 export async function getHouseholdSettings() {
-  const rows = check(await sb.from('app_settings').select('*'));
+  const rows = check(await sb.from('garage_settings').select('*'));
   return Object.fromEntries(rows.map((r) => [r.key, r.value]));
 }
 export async function setHouseholdSetting(key, value) {
-  return write(async () => check(await sb.from('app_settings').upsert({ key, value })));
+  return write(async () => check(await sb.from('garage_settings').upsert({ key, value })));
 }
 
 // ---------- live updates ----------
@@ -349,8 +349,8 @@ export async function setHouseholdSetting(key, value) {
 export function subscribe(onChange) {
   const channel = sb
     .channel('inventory')
-    .on('postgres_changes', { event: '*', schema: 'public', table: 'boxes' }, onChange)
-    .on('postgres_changes', { event: '*', schema: 'public', table: 'photos' }, onChange)
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'garage_boxes' }, onChange)
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'garage_photos' }, onChange)
     .subscribe();
   return () => sb.removeChannel(channel);
 }
@@ -366,8 +366,8 @@ const blobToDataUrl = (blob) =>
   });
 
 export async function exportAll(onProgress = () => {}) {
-  const boxes = check(await sb.from('boxes').select('*')).map(toBox);
-  const photos = check(await sb.from('photos').select('*').order('created_at')).map(toPhoto);
+  const boxes = check(await sb.from('garage_boxes').select('*')).map(toBox);
+  const photos = check(await sb.from('garage_photos').select('*').order('created_at')).map(toPhoto);
   const out = [];
   for (const [i, p] of photos.entries()) {
     onProgress(i + 1, photos.length);
@@ -380,7 +380,7 @@ export async function importAll(data, onProgress = () => {}) {
   if (data?.app !== 'garage-inventory') throw new Error("That file isn't a Garage Inventory backup.");
   const boxes = data.boxes || [];
   if (boxes.length) {
-    await write(async () => check(await sb.from('boxes').upsert(boxes.map(fromBox))));
+    await write(async () => check(await sb.from('garage_boxes').upsert(boxes.map(fromBox))));
   }
   const photos = data.photos || [];
   for (const [i, p] of photos.entries()) {

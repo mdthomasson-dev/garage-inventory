@@ -978,7 +978,7 @@ function notMemberScreen(email) {
   gate(`
     <h1>Not on the household list</h1>
     <p><b>${esc(email)}</b> is signed in, but it isn't one of the household's email addresses yet.</p>
-    <p class="small muted">In Supabase, open <b>Table Editor → household_members</b> and add this email (or add it to the last lines of <code>supabase/setup.sql</code> and run it again). Then tap Try again.</p>
+    <p class="small muted">In Supabase, open <b>Table Editor → garage_members</b> and add this email (or add it to the last lines of <code>supabase/setup.sql</code> and run it again). Then tap Try again.</p>
     <div class="row"><button class="btn primary" id="retry">Try again</button><button class="btn" id="out">Sign out</button></div>`);
   $('#retry').addEventListener('click', () => boot());
   $('#out').addEventListener('click', async () => {

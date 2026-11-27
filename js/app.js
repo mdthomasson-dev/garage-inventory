@@ -904,94 +904,30 @@ function loginScreen(message = '') {
   gate(`
     <div class="center"><img src="icons/icon-192.png" width="72" height="72" alt="" class="gate-icon"></div>
     <h1 class="center">Garage Inventory</h1>
-    <p class="muted center small">Sign in to see your household's boxes.</p>
+    <p class="muted center small">Sign in with your Google account to see your household's boxes.</p>
     ${message ? `<p class="notice small">${message}</p>` : ''}
     <button class="btn big google" id="google" type="button">
       <svg viewBox="0 0 48 48" width="20" height="20" aria-hidden="true"><path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3C33.7 32.7 29.2 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.3-.1-2.4-.4-3.5z"/><path fill="#FF3D00" d="m6.3 14.7 6.6 4.8C14.7 15.1 19 12 24 12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 16.3 4 9.7 8.3 6.3 14.7z"/><path fill="#4CAF50" d="M24 44c5.2 0 9.9-2 13.4-5.2l-6.2-5.2C29.2 35.1 26.7 36 24 36c-5.2 0-9.6-3.3-11.3-8l-6.5 5C9.5 39.6 16.2 44 24 44z"/><path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.8 2.2-2.2 4.2-4.1 5.6l6.2 5.2C37 39.2 44 34 44 24c0-1.3-.1-2.4-.4-3.5z"/></svg>
       Continue with Google
     </button>
-    <div class="divider"><span>or use email</span></div>
-    <form id="login">
-      <label class="field"><span>Email</span><input name="email" type="email" required autocomplete="username" autocapitalize="off"></label>
-      <label class="field"><span>Password</span><input name="password" type="password" required minlength="6" autocomplete="current-password"></label>
-      <button class="btn primary big" name="signin">Sign in</button>
-      <div class="row spread">
-        <button class="btn small" type="button" id="signup">Create account</button>
-        <button class="btn small" type="button" id="forgot">Forgot password?</button>
-      </div>
-    </form>
     <p class="error small" id="login-err"></p>`);
-  const form = $('#login');
   const err = $('#login-err');
   $('#google').addEventListener('click', async (e) => {
-    e.target.disabled = true;
+    const btn = e.currentTarget;
+    btn.disabled = true;
     try {
       await db.signInWithGoogle(); // navigates away to Google
     } catch (ex) {
       err.textContent = ex.message;
-      e.target.disabled = false;
+      btn.disabled = false;
     }
-  });
-  const busy = async (fn) => {
-    err.textContent = '';
-    form.querySelectorAll('button').forEach((b) => (b.disabled = true));
-    try {
-      await fn();
-    } catch (e) {
-      err.textContent = e.message;
-    } finally {
-      form.querySelectorAll('button').forEach((b) => (b.disabled = false));
-    }
-  };
-  form.addEventListener('submit', (e) => {
-    e.preventDefault();
-    busy(async () => {
-      await db.signIn(form.email.value.trim(), form.password.value);
-      await boot();
-    });
-  });
-  $('#signup').addEventListener('click', () => {
-    if (!form.reportValidity()) return;
-    busy(async () => {
-      const res = await db.signUp(form.email.value.trim(), form.password.value);
-      if (res.session) await boot();
-      else loginScreen(`Almost done: check <b>${esc(form.email.value.trim())}</b> for a confirmation email, tap the link, then come back here and sign in.`);
-    });
-  });
-  $('#forgot').addEventListener('click', () => {
-    if (!form.email.reportValidity()) return;
-    busy(async () => {
-      await db.resetPassword(form.email.value.trim());
-      err.textContent = '';
-      loginScreen('We sent you an email with a link to set a new password.');
-    });
   });
 }
 
 function friendlyAuthError(msg) {
   if (/signups? not allowed/i.test(msg))
-    return `Google sign-in worked, but there's no account for that Google email yet. In Supabase, add it under Authentication → Users (and to garage_members), then try again.`;
+    return `There's no account for that Google email yet. In Supabase, add it under Authentication → Users (tick Auto Confirm) and to garage_members, then try again.`;
   return msg;
-}
-
-function newPasswordScreen() {
-  gate(`
-    <h1>Choose a new password</h1>
-    <form id="pw">
-      <label class="field"><span>New password</span><input name="password" type="password" required minlength="6" autocomplete="new-password"></label>
-      <button class="btn primary big">Save password</button>
-    </form>
-    <p class="error small" id="pw-err"></p>`);
-  $('#pw').addEventListener('submit', async (e) => {
-    e.preventDefault();
-    try {
-      await db.setPassword(e.target.password.value);
-      toast('Password updated');
-      boot();
-    } catch (err) {
-      $('#pw-err').textContent = err.message;
-    }
-  });
 }
 
 function notMemberScreen(email) {
@@ -1051,7 +987,6 @@ async function boot() {
     const authError = params.get('error_description');
     if (/access_token|error|type=/.test(location.hash + location.search)) history.replaceState(null, '', location.pathname + '#/');
     if (!session && authError) return loginScreen(esc(friendlyAuthError(authError)));
-    if (recovering) return newPasswordScreen();
     if (!session) return loginScreen();
 
     let member = false;
@@ -1084,18 +1019,7 @@ async function boot() {
   return booting;
 }
 
-let recovering = false;
-if (db.connect()) {
-  db.sb.auth.onAuthStateChange((event) => {
-    if (event === 'PASSWORD_RECOVERY') {
-      recovering = true;
-      setTimeout(() => {
-        recovering = false;
-        newPasswordScreen();
-      });
-    }
-  });
-}
+db.connect();
 boot();
 
 if ('serviceWorker' in navigator && location.protocol === 'https:') {

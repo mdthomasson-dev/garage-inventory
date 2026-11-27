@@ -44,21 +44,9 @@ const appUrl = () => `${location.origin}${location.pathname}`;
 export async function getSession() {
   return check(await sb.auth.getSession()).session;
 }
-export async function signIn(email, password) {
-  return check(await sb.auth.signInWithPassword({ email, password }));
-}
-export async function signUp(email, password) {
-  return check(await sb.auth.signUp({ email, password, options: { emailRedirectTo: appUrl() } }));
-}
 export async function signInWithGoogle() {
   // Leaves the app for Google's sign-in page, then comes back here signed in.
   return check(await sb.auth.signInWithOAuth({ provider: 'google', options: { redirectTo: appUrl() } }));
-}
-export async function resetPassword(email) {
-  return check(await sb.auth.resetPasswordForEmail(email, { redirectTo: appUrl() }));
-}
-export async function setPassword(password) {
-  return check(await sb.auth.updateUser({ password }));
 }
 export async function signOut() {
   await sb.auth.signOut();

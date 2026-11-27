@@ -41,7 +41,7 @@ The camera and "install to home screen" need HTTPS, which GitHub Pages provides.
 - **iPhone:** open the link in **Safari** → Share button → **Add to Home Screen**.
 - **Android:** open in **Chrome** → ⋮ menu → **Install app**.
 
-Then tap **Create account** with one of the household emails, confirm via the email Supabase sends, and sign in.
+Then tap **Continue with Google**. (Google sign-in is set up under Supabase **Authentication → Sign In / Providers → Google**. Each person's Gmail must be under **Authentication → Users** and in `garage_members`.)
 
 ## 4. Turn on the AI (Gemini)
 

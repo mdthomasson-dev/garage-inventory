@@ -857,6 +857,27 @@ async function scanView() {
 
 // ---------- labels ----------
 
+/** Pre-cut sticker sheets the app can print onto exactly (inches, US Letter). */
+const SHEET_TEMPLATES = {
+  avery8163: { name: 'Avery 8163 / 5163 (2×4)', cols: 2, rows: 5, w: 4, h: 2, top: 0.5, left: 0.15625, gapX: 0.1875, gapY: 0 },
+};
+
+const readNum = (key, fallback = 0) => {
+  try {
+    const v = Number(localStorage.getItem(key));
+    return Number.isFinite(v) ? v : fallback;
+  } catch {
+    return fallback;
+  }
+};
+const saveNum = (key, v) => {
+  try {
+    localStorage.setItem(key, String(v));
+  } catch {
+    /* ignore */
+  }
+};
+
 async function labelsView(params) {
   const [labelBoxes, labelSections, nextNumber] = await Promise.all([db.allBoxes(), db.allSections(), db.nextCodeNumber()]);
   const boxes = labelBoxes.sort((a, b) => a.code.localeCompare(b.code, undefined, { numeric: true }));
@@ -906,20 +927,81 @@ async function labelsView(params) {
             <option value="small">Small · 1.5 in</option>
             <option value="medium">Medium · 2 in</option>
             <option value="large">Large · 3 in</option>
+            <optgroup label="Sticker sheets (no cutting)">
+              ${Object.entries(SHEET_TEMPLATES).map(([k, t]) => `<option value="${k}">${t.name}</option>`).join('')}
+            </optgroup>
           </select>
         </label>
+      </div>
+      <div id="sheet-opts" hidden>
+        <div class="row">
+          <label class="inline">Skip first <input type="number" id="skip" min="0" max="9" value="0" class="qty" inputmode="numeric"> stickers</label>
+        </div>
+        <p class="muted small">For a sheet you've already used part of: stickers are counted left to right, top to bottom.</p>
+        <details class="nudge">
+          <summary>Fine-tune position</summary>
+          <p class="muted small">Do a test print on plain paper and hold it against a sticker sheet up to the light. If it's off, nudge it here (millimetres; use minus numbers to go the other way). This phone remembers it.</p>
+          <div class="row">
+            <label class="inline">Right <input type="number" id="nudge-x" step="0.5" min="-15" max="15" class="qty" inputmode="decimal"> mm</label>
+            <label class="inline">Down <input type="number" id="nudge-y" step="0.5" min="-15" max="15" class="qty" inputmode="decimal"> mm</label>
+          </div>
+        </details>
       </div>
       <div class="row">
         <button class="btn primary big" id="print">🖨️ Print <span id="n">0</span> labels</button>
       </div>
       <div class="row"><button class="btn" id="clear-sheet">🗑️ Clear sheet</button></div>
-      <p class="muted small">Tip: in the print dialog, turn off headers/footers and set scale to 100%. Full-sheet sticker paper or plain paper + clear packing tape both work.</p>
+      <p class="muted small" id="print-tip"></p>
     </section>
 
     <h2>Preview</h2>
     <div id="print-sheet" class="label-sheet"></div>`;
 
+  if (![...$('#size').options].some((o) => o.value === size)) size = 'medium';
   $('#size').value = size;
+  $('#skip').value = 0;
+  $('#nudge-x').value = readNum('label-nudge-x');
+  $('#nudge-y').value = readNum('label-nudge-y');
+
+  // The printer page margins: none for sticker sheets (we position everything ourselves).
+  const pageStyle = document.createElement('style');
+  document.head.appendChild(pageStyle);
+  onCleanup(() => pageStyle.remove());
+
+  const labelHtml = (code) => {
+    const b = boxByCode.get(code);
+    return `${qrSvg(boxUrl(code))}
+      <div class="label-text">
+        <div class="label-code">${esc(code)}</div>
+        ${b?.name ? `<div class="label-name">${esc(b.name)}</div>` : ''}
+      </div>`;
+  };
+
+  /** Lays labels out on whole pages that match a pre-cut sticker sheet. */
+  const sheetPages = (codes, t) => {
+    const skip = Math.min(t.cols * t.rows - 1, Math.max(0, Math.floor(Number($('#skip').value) || 0)));
+    const nx = Number($('#nudge-x').value) || 0;
+    const ny = Number($('#nudge-y').value) || 0;
+    const slots = [...Array(skip).fill(null), ...codes];
+    const per = t.cols * t.rows;
+    const pages = [];
+    for (let i = 0; i < slots.length; i += per) pages.push(slots.slice(i, i + per));
+    const style = `--cols:${t.cols};--w:${t.w}in;--h:${t.h}in;--gx:${t.gapX}in;--gy:${t.gapY}in;--top:calc(${t.top}in + ${ny}mm);--left:calc(${t.left}in + ${nx}mm)`;
+    return pages
+      .map(
+        (pg) => `<div class="sheet-page" style="${style}">${pg
+          .map((code) => (code ? `<div class="sticker">${labelHtml(code)}</div>` : '<div class="sticker skipped"></div>'))
+          .join('')}</div>`,
+      )
+      .join('');
+  };
+
+  const fitPreview = () => {
+    const sheet = $('#print-sheet');
+    if (sheet?.classList.contains('sheets')) sheet.style.setProperty('--z', Math.min(1, view.clientWidth / (8.5 * 96 + 4)));
+  };
+  window.addEventListener('resize', fitPreview);
+  onCleanup(() => window.removeEventListener('resize', fitPreview));
 
   const readRange = () => {
     const count = Math.min(200, Math.max(1, Math.floor(Number($('#nblank').value) || 1)));
@@ -949,19 +1031,29 @@ async function labelsView(params) {
     $('#clrblank').hidden = !blanks.length;
     $('#mkblank').textContent = blanks.length ? 'Remake labels' : 'Make labels';
     const sheet = $('#print-sheet');
-    sheet.className = `label-sheet ${size}`;
-    sheet.innerHTML = codes.length
-      ? codes
-          .map((code) => {
-            const b = boxByCode.get(code);
-            return `<div class="label">
-              ${qrSvg(boxUrl(code))}
-              <div class="label-code">${esc(code)}</div>
-              ${b?.name ? `<div class="label-name">${esc(b.name)}</div>` : ''}
-            </div>`;
-          })
-          .join('')
-      : '<p class="muted">Nothing on the sheet yet. Make blank labels or pick boxes above.</p>';
+    const t = SHEET_TEMPLATES[size];
+    $('#sheet-opts').hidden = !t;
+    $('#print-tip').textContent = t
+      ? `In the print dialog choose Letter paper, scale 100% (not "Fit to page"), margins "Default" or "None", and turn off headers/footers. Load the sticker sheet the way your printer takes paper.`
+      : 'In the print dialog, set scale to 100% and turn off headers/footers. Full-sheet sticker paper or plain paper + clear packing tape both work.';
+    pageStyle.textContent = t ? '@page { size: letter; margin: 0; }' : '@page { margin: 0.4in; }';
+    if (!codes.length) {
+      sheet.className = 'label-sheet';
+      sheet.innerHTML = '<p class="muted">Nothing on the sheet yet. Make blank labels or pick boxes above.</p>';
+      return;
+    }
+    if (t) {
+      sheet.className = 'label-sheet sheets';
+      sheet.innerHTML = sheetPages(codes, t);
+      fitPreview();
+      const pages = sheet.querySelectorAll('.sheet-page').length;
+      $('#n').textContent = `${codes.length}`;
+      $('#print').lastChild.textContent = ` labels (${pages} sheet${pages === 1 ? '' : 's'})`;
+    } else {
+      sheet.className = `label-sheet ${size}`;
+      sheet.innerHTML = codes.map((code) => `<div class="label">${labelHtml(code)}</div>`).join('');
+      $('#print').lastChild.textContent = ' labels';
+    }
   };
 
   for (const id of ['nblank', 'start']) $(`#${id}`).addEventListener('input', describeRange);
@@ -999,6 +1091,13 @@ async function labelsView(params) {
     view.querySelectorAll('.pick input').forEach((cb) => (cb.checked = false));
     render();
   });
+  $('#skip').addEventListener('input', render);
+  for (const [id, key] of [['nudge-x', 'label-nudge-x'], ['nudge-y', 'label-nudge-y']]) {
+    $(`#${id}`).addEventListener('input', (e) => {
+      saveNum(key, Math.max(-15, Math.min(15, Number(e.target.value) || 0)));
+      render();
+    });
+  }
   $('#size').addEventListener('change', (e) => {
     size = e.target.value;
     try {

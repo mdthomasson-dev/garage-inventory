@@ -248,3 +248,37 @@ body.offline .topbar::after {
 .contents li { break-inside: avoid; padding: 1px 0; overflow-wrap: anywhere; }
 .contents-card { align-items: flex-start; }
 .contents-card .card-body { flex: 1; }
+
+/* cut-it-yourself labels: text block centred under the QR */
+.label .label-text { display: flex; flex-direction: column; align-items: center; width: 100%; }
+
+/* pre-cut sticker sheets (exact positions, US Letter) */
+.label-sheet.sheets { display: block; padding: 0; background: none; border-radius: 0; }
+.sheet-page {
+  width: 8.5in; height: 11in; overflow: hidden; background: #fff; color: #000; box-sizing: border-box;
+  padding: var(--top) 0 0 var(--left);
+  display: grid; grid-template-columns: repeat(var(--cols), var(--w)); grid-auto-rows: var(--h);
+  column-gap: var(--gx); row-gap: var(--gy); align-content: start;
+  break-after: page; page-break-after: always;
+}
+.sheet-page:last-child { break-after: auto; page-break-after: auto; }
+.sticker {
+  box-sizing: border-box; overflow: hidden; display: flex; align-items: center; gap: 0.15in;
+  padding: 0.15in 0.2in 0.15in 0.15in;
+}
+.sticker svg { height: 100%; width: auto; flex: none; }
+.sticker .label-text { min-width: 0; flex: 1; }
+.sticker .label-code { font: 800 0.4in/1.05 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: 0.01em; white-space: nowrap; }
+.sticker .label-name { font-size: 0.2in; line-height: 1.2; margin-top: 0.06in; max-height: 3.6em; overflow: hidden; text-align: left; }
+@media screen {
+  .label-sheet.sheets { zoom: var(--z, 0.45); }
+  .sheet-page { box-shadow: 0 1px 6px rgb(0 0 0 / 0.25); margin: 0 0 16px; }
+  .sticker { outline: 2px dashed #c8cdd4; outline-offset: -2px; border-radius: 0.12in; }
+  .sticker.skipped { background: repeating-linear-gradient(45deg, #f1f3f5 0 10px, #fff 10px 20px); }
+}
+@media print {
+  .label-sheet.sheets { zoom: 1; }
+  .sheet-page { box-shadow: none; margin: 0; }
+}
+.nudge summary { cursor: pointer; font-weight: 600; padding: 6px 0; }
+.inline select { max-width: 60vw; }

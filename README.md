@@ -61,6 +61,8 @@ The key is shared with your household (stored in Supabase, readable only by memb
 4. Add a **name**, pick its **section** and spot, then **Take photo** of the contents. Gemini suggests the items — untick anything wrong and tap **Add to box**.
 5. Later: search on the **Boxes** tab, or ask on the **Ask** tab.
 
+**Sticker sheets:** choose **Avery 8163 / 5163 (2×4)** as the label size to print straight onto those 10-per-sheet stickers, no cutting. Use **Skip first N stickers** for a part-used sheet, and **Fine-tune position** if your printer is a millimetre or two off.
+
 **Printing tips:** use 100% scale and turn off headers/footers. Plain paper under clear packing tape works well, or use full-sheet sticker paper. Three sizes are available (1.5", 2", 3").
 
 ## Backups

@@ -390,6 +390,17 @@ async function boxView(code) {
       <textarea id="notes" rows="3" placeholder="Anything else worth remembering">${esc(box.notes)}</textarea>
     </section>
 
+    ${(() => {
+      // Working along a section: go straight on to the next box, or back to the section.
+      const sec = sections.find((x) => x.id === box.sectionId);
+      if (!sec) return '';
+      const id = encodeURIComponent(sec.id);
+      return `<div class="next-box">
+        <a class="btn primary big" href="#/scan?section=${id}">📷 Scan another box into ${esc(sec.name || 'this section')}</a>
+        <a class="btn big" href="#/section/${id}">Done: back to ${esc(sec.name || 'section')}</a>
+      </div>`;
+    })()}
+
     <div class="row spread">
       <a class="btn" href="#/labels?codes=${encodeURIComponent(box.code)}">🖨️ Print label</a>
       <button class="btn danger" id="del">Delete box</button>
@@ -901,7 +912,7 @@ async function scanView(params = new URLSearchParams()) {
       go(`#/box/${encodeURIComponent(code)}`);
       return true; // stop scanning
     }
-    // Section mode: put this box in the section, then go back to the section.
+    // Section mode: put this box in the section, then open its page to fill it in.
     if (busy) return false;
     busy = true;
     status.textContent = `Putting ${code} in ${sec.name || 'this section'}…`;
@@ -917,7 +928,7 @@ async function scanView(params = new URLSearchParams()) {
             ? `${code} is already in ${sec.name || 'this section'}`
             : `${code} moved to ${sec.name || 'this section'}`,
       );
-      go(secHref);
+      go(`#/box/${encodeURIComponent(code)}`);
       return true;
     } catch (err) {
       status.textContent = err.message;

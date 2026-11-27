@@ -305,3 +305,5 @@ body.offline .topbar::after {
 .scanned a { text-decoration: none; }
 /* A faded-out toast must never catch taps meant for what's underneath it. */
 #toast:not(.show) { pointer-events: none !important; }
+.next-box { margin: 16px 0 8px; }
+.next-box .btn.big { margin: 0 0 8px; white-space: normal; text-align: center; }

@@ -1099,5 +1099,17 @@ if (db.connect()) {
 boot();
 
 if ('serviceWorker' in navigator && location.protocol === 'https:') {
-  navigator.serviceWorker.register('sw.js').catch(() => {});
+  // When a new version of the app finishes downloading, switch to it right away
+  // (unless the app is being installed for the first time).
+  const hadController = Boolean(navigator.serviceWorker.controller);
+  let reloaded = false;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (!hadController || reloaded) return;
+    reloaded = true;
+    location.reload();
+  });
+  navigator.serviceWorker
+    .register('sw.js')
+    .then((reg) => document.addEventListener('visibilitychange', () => document.visibilityState === 'visible' && reg.update()))
+    .catch(() => {});
 }

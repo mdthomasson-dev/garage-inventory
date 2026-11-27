@@ -1,6 +1,6 @@
 // Caches the app so it opens instantly and works offline (AI features still need internet).
 // Bump CACHE when you change files so phones pick up the new version.
-const CACHE = 'garage-inventory-v4';
+const CACHE = 'garage-inventory-v5';
 const SHELL = [
   './',
   'index.html',
@@ -22,7 +22,7 @@ const SHELL = [
 ];
 
 self.addEventListener('install', (e) => {
-  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));
+  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL.map((u) => new Request(u, { cache: 'reload' })))).then(() => self.skipWaiting()));
 });
 
 self.addEventListener('activate', (e) => {

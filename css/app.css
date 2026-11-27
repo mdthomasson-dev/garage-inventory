@@ -220,3 +220,6 @@ body.offline .topbar::after {
 }
 .photo.uploading { display: grid; place-items: center; background: var(--bg); border-radius: 8px; }
 .photo.uploading .spinner { width: 28px; height: 28px; margin: 0; }
+.btn.google { background: #fff; color: #1f1f1f; border-color: #dadce0; gap: 10px; }
+.divider { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 0.8rem; margin: 14px 0 4px; }
+.divider::before, .divider::after { content: ""; flex: 1; height: 1px; background: var(--border); }

@@ -54,8 +54,9 @@ async function sendWithLightThinking(model, body, seconds) {
       thinkingChoice.set(model, i);
       return data;
     } catch (e) {
-      // This model doesn't accept that thinking setting: try the next one.
-      if (e.status === 400 && /think/i.test(e.message) && i < THINKING_OPTIONS.length - 1) continue;
+      // Google rejected the request while we were sending a thinking setting. Some models reject it
+      // with a generic "invalid argument" message, so try the next setting (and finally none at all).
+      if (e.status === 400 && opt && i < THINKING_OPTIONS.length - 1) continue;
       throw e;
     }
   }

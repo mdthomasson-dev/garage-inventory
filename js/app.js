@@ -140,7 +140,7 @@ const routes = [
   [/^#?\/?$/, () => homeView()],
   [/^#\/box\/([^/?]+)$/, (m) => boxView(decodeURIComponent(m[1]))],
   [/^#\/section\/([^/?]+)$/, (m) => sectionView(decodeURIComponent(m[1]))],
-  [/^#\/scan$/, () => scanView()],
+  [/^#\/scan(?:\?(.*))?$/, (m) => scanView(new URLSearchParams(m[1] || ''))],
   [/^#\/labels(?:\?(.*))?$/, (m) => labelsView(new URLSearchParams(m[1] || ''))],
   [/^#\/ask$/, () => askView()],
   [/^#\/settings$/, () => settingsView()],
@@ -707,8 +707,9 @@ async function sectionView(id) {
     <h2>What's in this section <span class="muted">(${here.length} box${here.length === 1 ? '' : 'es'}, ${here.reduce((n, b) => n + itemCount(b), 0)} items)</span></h2>
     ${here.length ? '<input id="sec-q" type="search" placeholder="Search this section…" autocomplete="off">' : ''}
     <div class="cards" id="sec-boxes"></div>
+    <a class="btn primary big" href="#/scan?section=${encodeURIComponent(sec.id)}">📷 Scan boxes into this section</a>
     <div class="row">
-      <button class="btn primary" id="new-here">+ New box here</button>
+      <button class="btn" id="new-here">+ New box here</button>
       ${others.length ? '<button class="btn" id="move-here">Move boxes here</button>' : ''}
     </div>
     <div class="row spread">
@@ -847,23 +848,30 @@ async function sectionView(id) {
 
 // ---------- scanner ----------
 
-async function scanView() {
+async function scanView(params = new URLSearchParams()) {
+  // With ?section=<id>, every label scanned is put into that section (scan along a shelf, box after box).
+  const sec = params.get('section') ? await db.getSection(params.get('section')) : null;
+  const secHref = sec ? `#/section/${encodeURIComponent(sec.id)}` : '';
+
   view.innerHTML = `
-    <h1>Scan a label</h1>
+    ${
+      sec
+        ? `<div class="box-head"><a href="${secHref}" class="back">‹ ${esc(sec.name || 'Section')}</a></div>
+           <h1>Scan boxes into “${esc(sec.name || 'this section')}”</h1>`
+        : '<h1>Scan a label</h1>'
+    }
     <div class="scanner"><video playsinline muted autoplay></video><div class="frame"></div></div>
     <p class="muted center" id="status">Starting camera…</p>
+    ${sec ? '<ul class="scanned" id="scanned"></ul>' : ''}
     <form id="manual" class="row">
       <input name="code" placeholder="Or type a code, e.g. BOX-007" autocapitalize="characters" autocomplete="off">
-      <button class="btn">Go</button>
+      <button class="btn">${sec ? 'Add' : 'Go'}</button>
     </form>
-    <p class="muted small center">Your phone's normal camera app can scan the labels too — they open straight to the box.</p>`;
-
-  $('#manual').addEventListener('submit', (e) => {
-    e.preventDefault();
-    const code = parseCode(e.target.code.value);
-    if (code) go(`#/box/${encodeURIComponent(code)}`);
-    else toast('Codes look like BOX-007');
-  });
+    ${
+      sec
+        ? `<a class="btn primary big" href="${secHref}">Done</a>`
+        : '<p class="muted small center">Your phone\'s normal camera app can scan the labels too — they open straight to the box.</p>'
+    }`;
 
   const status = $('#status');
   const video = $('video');
@@ -872,6 +880,58 @@ async function scanView() {
   onCleanup(() => {
     active = false;
     stream?.getTracks().forEach((t) => t.stop());
+  });
+
+  // --- what happens with each code ---
+  const done = new Map(); // code -> time handled (section mode)
+  let busy = false;
+  const addLine = (code, text, cls = '') => {
+    const li = document.createElement('li');
+    li.className = cls;
+    li.innerHTML = `<a href="#/box/${encodeURIComponent(code)}"><b>${esc(code)}</b></a> <span>${esc(text)}</span>`;
+    $('#scanned')?.prepend(li);
+  };
+  const handleCode = async (code) => {
+    if (!sec) {
+      navigator.vibrate?.(60);
+      go(`#/box/${encodeURIComponent(code)}`);
+      return true; // stop scanning
+    }
+    if (busy) return false;
+    if (done.has(code)) {
+      if (Date.now() - done.get(code) > 3000) status.textContent = `${code} is already done. Scan the next box.`;
+      return false;
+    }
+    busy = true;
+    done.set(code, Date.now());
+    try {
+      const existing = await db.getBox(code);
+      if (!existing) {
+        await db.createBox(code, sec.id);
+        addLine(code, 'new box added here ✓', 'ok');
+      } else if (existing.sectionId === sec.id) {
+        addLine(code, `${existing.name || 'Unnamed box'}: already here ✓`);
+      } else {
+        await db.updateBox(code, (b) => (b.sectionId = sec.id));
+        addLine(code, `${existing.name || 'Unnamed box'}: moved here ✓`, 'ok');
+      }
+      navigator.vibrate?.(80);
+      status.textContent = `${done.size} scanned. Point at the next box label, or tap Done.`;
+    } catch (err) {
+      done.delete(code);
+      addLine(code, err.message, 'problem');
+    } finally {
+      busy = false;
+    }
+    return false; // keep scanning
+  };
+
+  $('#manual').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const code = parseCode(e.target.code.value);
+    if (!code) return toast('Codes look like BOX-007');
+    e.target.reset();
+    await handleCode(code);
   });
 
   if (!navigator.mediaDevices?.getUserMedia) {
@@ -894,7 +954,7 @@ async function scanView() {
   } catch {
     /* autoplay attr covers it */
   }
-  status.textContent = 'Point the camera at a box label.';
+  status.textContent = sec ? 'Point the camera at each box label in turn.' : 'Point the camera at a box label.';
 
   let detector = null;
   try {
@@ -928,11 +988,10 @@ async function scanView() {
       if (text && active) {
         const code = parseCode(text);
         if (code) {
-          navigator.vibrate?.(60);
-          go(`#/box/${encodeURIComponent(code)}`);
-          return;
+          if (await handleCode(code)) return;
+        } else {
+          status.textContent = "That QR code isn't one of your box labels.";
         }
-        status.textContent = "That QR code isn't one of your box labels.";
       }
     }
     setTimeout(tick, 180);

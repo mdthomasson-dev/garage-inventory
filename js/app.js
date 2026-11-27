@@ -750,7 +750,13 @@ async function settingsView() {
         <div class="row tight"><input id="key" type="password" value="${esc(settings.apiKey)}" placeholder="AIza…" autocomplete="off" spellcheck="false">
         <button class="btn small" id="show" type="button">Show</button></div>
       </label>
-      <label class="field"><span>Model</span><input id="model" value="${esc(settings.model)}" placeholder="${DEFAULT_MODEL}" spellcheck="false" autocapitalize="off"></label>
+      <label class="field"><span>Model</span>
+        <select id="model">
+          <option value="${DEFAULT_MODEL}">Automatic (recommended)</option>
+          ${settings.model !== DEFAULT_MODEL ? `<option value="${esc(settings.model)}" selected>${esc(settings.model)}</option>` : ''}
+        </select>
+      </label>
+      <p class="muted small" id="model-note">${settings.apiKey ? 'Loading the models your key can use…' : 'Add your key to see the available models.'}</p>
       <label class="check"><input type="checkbox" id="auto" ${settings.autoIdentify ? 'checked' : ''}> Identify items automatically when I add a photo</label>
       <div class="row"><button class="btn" id="test">Test key</button><span id="test-out" class="small"></span></div>
     </section>
@@ -797,6 +803,7 @@ async function settingsView() {
     try {
       await db.setHouseholdSetting('gemini_api_key', settings.apiKey);
       toast('API key saved for the household');
+      loadModels();
     } catch (err) {
       toast(err.message);
     }
@@ -806,11 +813,35 @@ async function settingsView() {
     e.target.textContent = key.type === 'password' ? 'Show' : 'Hide';
   });
   $('#model').addEventListener('change', async (e) => {
-    settings.model = e.target.value.trim() || DEFAULT_MODEL;
-    e.target.value = settings.model;
+    settings.model = e.target.value || DEFAULT_MODEL;
     saveSettings();
-    db.setHouseholdSetting('gemini_model', settings.model).catch((err) => toast(err.message));
+    db.setHouseholdSetting('gemini_model', settings.model)
+      .then(() => toast('Model saved for the household'))
+      .catch((err) => toast(err.message));
   });
+  const loadModels = async () => {
+    if (!settings.apiKey) return;
+    const note = $('#model-note');
+    try {
+      const models = await ai.listModels();
+      const sel = $('#model');
+      if (!sel) return;
+      sel.innerHTML =
+        `<option value="${DEFAULT_MODEL}">Automatic (recommended)</option>` +
+        models
+          .filter((m) => m.id !== DEFAULT_MODEL)
+          .map((m) => `<option value="${esc(m.id)}">${esc(m.label)}${/-latest$/.test(m.id) ? '' : ` · ${esc(m.id)}`}</option>`)
+          .join('');
+      if (![...sel.options].some((o) => o.value === settings.model)) {
+        sel.insertAdjacentHTML('beforeend', `<option value="${esc(settings.model)}">${esc(settings.model)}</option>`);
+      }
+      sel.value = settings.model;
+      note.textContent = 'Automatic uses Google\'s current Flash model and switches to Flash-Lite when it\'s busy. Flash models are fast and free-tier friendly; "Pro" models are smarter but slower with tighter free limits.';
+    } catch (err) {
+      note.textContent = `Couldn't load the model list: ${err.message}`;
+    }
+  };
+  loadModels();
   $('#auto').addEventListener('change', (e) => {
     settings.autoIdentify = e.target.checked;
     saveSettings();

@@ -81,6 +81,18 @@ function parseJson(text) {
   }
 }
 
+/** Lists the Gemini models this key can use for text + photos, best everyday picks first. */
+export async function listModels() {
+  const data = await call(`${BASE.replace(/\/$/, '')}?pageSize=1000`, { method: 'GET' }, 20);
+  const skip = /embed|tts|audio|live|image-generation|imagen|veo|aqa|learnlm|robotics|computer-use|native|-image\b|-image-/i;
+  const models = (data.models || [])
+    .filter((m) => /gemini/i.test(m.name) && (m.supportedGenerationMethods || []).includes('generateContent') && !skip.test(m.name))
+    .map((m) => ({ id: m.name.replace(/^models\//, ''), label: m.displayName || m.name }));
+  const rank = (id) =>
+    (/-latest$/.test(id) ? 0 : 2) + (/flash-lite/.test(id) ? 1 : /flash/.test(id) ? 0 : 3) + (/preview|exp/.test(id) ? 4 : 0);
+  return models.sort((a, b) => rank(a.id) - rank(b.id) || b.id.localeCompare(a.id, undefined, { numeric: true }));
+}
+
 /** Checks the key and model with Google without generating anything (quick and free). */
 export async function testKey() {
   const info = await call(`${BASE}${encodeURIComponent(modelName())}`, { method: 'GET' }, 20);

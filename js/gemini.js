@@ -1,6 +1,6 @@
 // Talks to the Gemini API directly from your phone using your Google AI Studio key.
 import { settings, DEFAULT_MODEL } from './settings.js';
-import { blobToBase64 } from './image.js';
+import { blobToBase64, resizeImage } from './image.js';
 
 const BASE = 'https://generativelanguage.googleapis.com/v1beta/models/';
 const modelName = () => (settings.model || DEFAULT_MODEL).replace(/^models\//, '');
@@ -16,7 +16,8 @@ async function call(url, init, seconds) {
   try {
     res = await fetch(url, { ...init, headers: { ...(init.headers || {}), 'x-goog-api-key': settings.apiKey }, signal: ctrl.signal });
   } catch (e) {
-    if (e.name === 'AbortError') throw new Error(`Gemini didn't answer within ${seconds} seconds. Try again, or try a different model in Settings.`);
+    if (e.name === 'AbortError')
+      throw Object.assign(new Error(`Gemini didn't answer within ${seconds} seconds. Try again, or try a different model in Settings.`), { timeout: true });
     throw new Error("Couldn't reach Gemini. Check your internet connection.");
   } finally {
     clearTimeout(timer);
@@ -31,35 +32,62 @@ async function call(url, init, seconds) {
   return data;
 }
 
-// Used when the chosen model is too busy.
+// Used when the chosen model is too busy or too slow.
 const FALLBACK_MODEL = 'gemini-flash-lite-latest';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-/** Asks Gemini, waiting and retrying when it's busy, then trying the lighter model. */
-async function generate(body, seconds = 90) {
-  const send = (model) =>
-    call(`${BASE}${encodeURIComponent(model)}:generateContent`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    }, seconds);
+// Listing items in a photo doesn't need long "thinking", which is what makes newer models slow.
+// Different model generations take different settings, so try them in turn and remember what works.
+const THINKING_OPTIONS = [{ thinkingBudget: 0 }, { thinkingLevel: 'minimal' }, { thinkingLevel: 'low' }, null];
+const thinkingChoice = new Map(); // model -> index into THINKING_OPTIONS
+
+async function sendWithLightThinking(model, body, seconds) {
+  for (let i = thinkingChoice.get(model) ?? 0; i < THINKING_OPTIONS.length; i++) {
+    const opt = THINKING_OPTIONS[i];
+    const withThinking = opt ? { ...body, generationConfig: { ...(body.generationConfig || {}), thinkingConfig: opt } } : body;
+    try {
+      const data = await call(`${BASE}${encodeURIComponent(model)}:generateContent`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(withThinking),
+      }, seconds);
+      thinkingChoice.set(model, i);
+      return data;
+    } catch (e) {
+      // This model doesn't accept that thinking setting: try the next one.
+      if (e.status === 400 && /think/i.test(e.message) && i < THINKING_OPTIONS.length - 1) continue;
+      throw e;
+    }
+  }
+}
+
+/** Asks Gemini quickly: retries when it's busy, and switches to the lighter model when it's busy or slow. */
+async function generate(body, seconds = 60) {
   let data;
   let lastErr;
-  const attempts = [[modelName(), 0], [modelName(), 2000], [modelName(), 5000]];
-  if (modelName() !== FALLBACK_MODEL) attempts.push([FALLBACK_MODEL, 0]);
-  for (const [model, wait] of attempts) {
+  const main = modelName();
+  const attempts = [[main, 0], [main, 2000], [main, 5000]];
+  if (main !== FALLBACK_MODEL) attempts.push([FALLBACK_MODEL, 0]);
+  for (let i = 0; i < attempts.length; i++) {
+    const [model, wait] = attempts[i];
     if (wait) await sleep(wait);
     try {
-      data = await send(model);
+      data = await sendWithLightThinking(model, body, seconds);
       break;
     } catch (e) {
       lastErr = e;
       const fallbackMissing = model === FALLBACK_MODEL && e.status === 404;
+      if (e.timeout) {
+        // Too slow: don't wait for it again, go straight to the lighter model.
+        while (i + 1 < attempts.length && attempts[i + 1][0] === model) i++;
+        continue;
+      }
       if (!e.busy && !fallbackMissing) throw e;
     }
   }
   if (!data) {
     if (lastErr?.status === 429) throw new Error("You've hit Gemini's free usage limit for now. Wait a minute (or until tomorrow if it keeps happening) and try again.");
+    if (lastErr?.timeout) throw new Error('Gemini is taking too long right now. Tap Try again in a few minutes.');
     throw new Error('Gemini is very busy right now. Please try again in a few minutes.');
   }
   const cand = data.candidates?.[0];
@@ -101,7 +129,14 @@ export async function testKey() {
 
 /** Looks at a photo of a box's contents and lists the items it can see. */
 export async function identifyItems(blob, existingItems = []) {
-  const data = await blobToBase64(blob);
+  // A 1024px copy is plenty to recognise things and is much quicker to upload and process.
+  let small = blob;
+  try {
+    small = await resizeImage(blob, 1024, 0.8);
+  } catch {
+    /* use the original */
+  }
+  const data = await blobToBase64(small);
   const already = existingItems.length
     ? `The box is already known to contain: ${existingItems.map((i) => i.name).join(', ')}. Do not repeat those unless you can see more of them.`
     : '';
@@ -111,7 +146,7 @@ Use short, plain, searchable names (e.g. "Cordless drill", "Extension cord, oran
 Group identical items and give a quantity. Give each item a simple category (Tools, Electrical, Holiday, Camping, Sports, Automotive, Kitchen, Garden, Paint, Hardware, Toys, Clothing, Documents, Other).
 Also suggest a short name for the box based on what's in it. ${already}`;
   const text = await generate({
-    contents: [{ parts: [{ inlineData: { mimeType: blob.type || 'image/jpeg', data } }, { text: prompt }] }],
+    contents: [{ parts: [{ inlineData: { mimeType: small.type || 'image/jpeg', data } }, { text: prompt }] }],
     generationConfig: {
       responseMimeType: 'application/json',
       responseSchema: {
@@ -146,13 +181,19 @@ Also suggest a short name for the box based on what's in it. ${already}`;
 
 /** Suggests a short name for an area of the garage from a photo of it. */
 export async function suggestSectionName(blob) {
-  const data = await blobToBase64(blob);
+  let small = blob;
+  try {
+    small = await resizeImage(blob, 768, 0.8);
+  } catch {
+    /* use the original */
+  }
+  const data = await blobToBase64(small);
   const text = await generate(
     {
       contents: [
         {
           parts: [
-            { inlineData: { mimeType: blob.type || 'image/jpeg', data } },
+            { inlineData: { mimeType: small.type || 'image/jpeg', data } },
             {
               text: 'This is a photo of one area of a home garage (for example a shelving unit, a wall, a corner, a workbench or overhead storage). Suggest a short, practical name of 2 to 4 words that a family would use to refer to this area, like "Metal shelves by door" or "Workbench". Describe the storage, not the items.',
             },

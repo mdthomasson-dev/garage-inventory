@@ -1,11 +1,12 @@
 // Caches the app so it opens instantly and works offline (AI features still need internet).
 // Bump CACHE when you change files so phones pick up the new version.
-const CACHE = 'garage-inventory-v1';
+const CACHE = 'garage-inventory-v2';
 const SHELL = [
   './',
   'index.html',
   'css/app.css',
   'js/app.js',
+  'js/config.js',
   'js/db.js',
   'js/gemini.js',
   'js/image.js',
@@ -13,6 +14,7 @@ const SHELL = [
   'js/settings.js',
   'vendor/qrcode.js',
   'vendor/jsQR.js',
+  'vendor/supabase.js',
   'manifest.webmanifest',
   'icons/icon-192.png',
   'icons/icon-512.png',

@@ -5,6 +5,8 @@ import { resizeImage } from './image.js';
 import { qrSvg, parseCode } from './qr.js';
 import { settings, saveSettings, DEFAULT_MODEL } from './settings.js';
 
+const tabs = document.querySelector('.tabs');
+
 const view = document.getElementById('view');
 let cleanups = [];
 
@@ -62,11 +64,15 @@ async function askForPersistentStorage() {
 }
 
 async function createBox(code) {
-  const [c] = code ? [code] : await db.reserveCodes(1);
-  const box = db.newBox(c);
-  await db.putBox(box);
+  const box = await db.createBox(code);
   askForPersistentStorage();
   return box;
+}
+
+/** Shows a photo's thumbnail once it has downloaded (or comes out of the phone's cache). */
+async function fillThumb(img, photo) {
+  const blob = await db.thumbBlob(photo);
+  if (blob && img.isConnected) img.src = objUrl(blob);
 }
 
 const itemCount = (b) => (b.items || []).reduce((n, i) => n + (Number(i.qty) || 1), 0);
@@ -82,7 +88,8 @@ const routes = [
   [/^#\/settings$/, () => settingsView()],
 ];
 
-async function router() {
+async function router({ keepScroll = false } = {}) {
+  if (!ready) return;
   cleanups.forEach((fn) => {
     try {
       fn();
@@ -103,13 +110,14 @@ async function router() {
       console.error(e);
       view.innerHTML = `<p class="error">Something went wrong: ${esc(e.message)}</p>`;
     }
-    window.scrollTo(0, 0);
+    if (!keepScroll) window.scrollTo(0, 0);
     return;
   }
   go('#/');
 }
 
-window.addEventListener('hashchange', router);
+let ready = false;
+window.addEventListener('hashchange', () => router());
 
 // ---------- home: list + search ----------
 
@@ -124,13 +132,8 @@ async function homeView() {
     </div>
     <div id="list" class="cards"></div>`;
 
-  const thumbs = new Map();
-  await Promise.all(
-    boxes.map(async (b) => {
-      const p = await db.firstPhoto(b.code);
-      if (p) thumbs.set(b.code, objUrl(p.thumb || p.blob));
-    }),
-  );
+  const firstPhoto = new Map();
+  for (const p of await db.allPhotos()) if (!firstPhoto.has(p.boxCode)) firstPhoto.set(p.boxCode, p);
 
   const render = () => {
     lastQuery = $('#q').value;
@@ -146,10 +149,9 @@ async function homeView() {
         if (!boxHit && !hits.length) continue;
       }
       shown++;
-      const t = thumbs.get(b.code);
       html += `
         <a class="card" href="#/box/${encodeURIComponent(b.code)}">
-          ${t ? `<img class="thumb" src="${t}" alt="">` : '<div class="thumb empty">📦</div>'}
+          ${firstPhoto.has(b.code) ? `<img class="thumb" data-code="${esc(b.code)}" alt="">` : '<div class="thumb empty">📦</div>'}
           <div class="card-body">
             <div class="code">${esc(b.code)}</div>
             <div class="name">${esc(b.name || 'Unnamed box')}</div>
@@ -169,12 +171,19 @@ async function homeView() {
       html = `<p class="muted center">Nothing matches “${esc(lastQuery)}”. ${ai.hasKey() ? `<a href="#/ask">Ask Gemini instead?</a>` : ''}</p>`;
     }
     $('#list').innerHTML = html;
+    view.querySelectorAll('img.thumb[data-code]').forEach((img) => fillThumb(img, firstPhoto.get(img.dataset.code)));
   };
 
   $('#q').addEventListener('input', render);
-  $('#new').addEventListener('click', async () => {
-    const box = await createBox();
-    go(`#/box/${encodeURIComponent(box.code)}`);
+  $('#new').addEventListener('click', async (e) => {
+    e.target.disabled = true;
+    try {
+      const box = await createBox();
+      go(`#/box/${encodeURIComponent(box.code)}`);
+    } catch (err) {
+      toast(err.message);
+      e.target.disabled = false;
+    }
   });
   render();
 }
@@ -193,8 +202,12 @@ async function boxView(code) {
         <p><a href="#/">Back to boxes</a></p>
       </div>`;
     $('#setup').addEventListener('click', async () => {
-      await createBox(code);
-      router();
+      try {
+        await createBox(code);
+        router();
+      } catch (err) {
+        toast(err.message);
+      }
     });
     return;
   }
@@ -240,11 +253,21 @@ async function boxView(code) {
       <button class="btn danger" id="del">Delete box</button>
     </div>`;
 
-  const save = () => db.putBox(box);
+  /** Applies a change to the latest copy of this box in the cloud, then redraws. */
+  const change = async (fn) => {
+    try {
+      box = await db.updateBox(box.code, fn);
+      renderItems();
+      return true;
+    } catch (err) {
+      toast(err.message);
+      return false;
+    }
+  };
   for (const f of ['name', 'location', 'notes']) {
     $(`#${f}`).addEventListener('change', (e) => {
-      box[f] = e.target.value.trim();
-      save();
+      const v = e.target.value.trim();
+      change((b) => (b[f] = v));
     });
   }
 
@@ -273,11 +296,10 @@ async function boxView(code) {
     const f = e.target;
     const name = f.name.value.trim();
     if (!name) return;
-    box.items.push(db.newItem({ name, qty: f.qty.value }));
-    save();
+    const item = db.newItem({ name, qty: f.qty.value });
     f.reset();
     f.name.focus();
-    renderItems();
+    change((b) => b.items.push(item));
   });
 
   $('#items').addEventListener('click', (e) => {
@@ -287,9 +309,7 @@ async function boxView(code) {
     const item = box.items.find((i) => i.id === li.dataset.id);
     if (!item) return;
     if (btn.dataset.act === 'del') {
-      box.items = box.items.filter((i) => i !== item);
-      save();
-      renderItems();
+      change((b) => (b.items = b.items.filter((i) => i.id !== item.id)));
     } else if (btn.dataset.act === 'edit') {
       li.innerHTML = `
         <form class="edit-item">
@@ -302,11 +322,13 @@ async function boxView(code) {
       form.name.focus();
       form.addEventListener('submit', (ev) => {
         ev.preventDefault();
-        item.name = form.name.value.trim() || item.name;
-        item.qty = Math.max(1, Number(form.qty.value) || 1);
-        item.category = form.category.value.trim();
-        save();
-        renderItems();
+        const name = form.name.value.trim() || item.name;
+        const qty = Math.max(1, Number(form.qty.value) || 1);
+        const category = form.category.value.trim();
+        change((b) => {
+          const it = b.items.find((i) => i.id === item.id);
+          if (it) Object.assign(it, { name, qty, category });
+        });
       });
     }
   });
@@ -315,23 +337,28 @@ async function boxView(code) {
   let photos = await db.photosFor(box.code);
   const renderPhotos = () => {
     $('#photos').innerHTML = photos.length
-      ? photos.map((p) => `<button class="photo" data-id="${p.id}"><img src="${objUrl(p.thumb || p.blob)}" alt="Photo of box contents"></button>`).join('')
+      ? photos.map((p) => `<button class="photo" data-id="${p.id}"><img alt="Photo of box contents"></button>`).join('')
       : '<p class="muted small">No photos yet.</p>';
+    view.querySelectorAll('.photo').forEach((btn) => fillThumb(btn.querySelector('img'), photos.find((p) => p.id === btn.dataset.id)));
   };
 
   const addFiles = async (files) => {
     for (const file of files) {
+      const busy = document.createElement('div');
+      busy.className = 'photo uploading';
+      busy.innerHTML = '<div class="spinner"></div>';
+      $('#photos').querySelector('p')?.remove();
+      $('#photos').appendChild(busy);
       try {
         const blob = await resizeImage(file, 1600);
         const thumb = await resizeImage(file, 360, 0.7);
         const photo = await db.addPhoto({ boxCode: box.code, blob, thumb });
         photos.push(photo);
-        box.updatedAt = Date.now();
-        save();
         renderPhotos();
         // With several photos at once, skip auto-identify so result sheets don't stack up.
-        if (files.length === 1 && ai.hasKey() && settings.autoIdentify) await identify(photo);
+        if (files.length === 1 && ai.hasKey() && settings.autoIdentify) await identify(photo, blob);
       } catch (err) {
+        busy.remove();
         toast(err.message || 'Could not add that photo.');
       }
     }
@@ -349,19 +376,27 @@ async function boxView(code) {
     const photo = photos.find((p) => p.id === btn.dataset.id);
     if (!photo) return;
     const m = modal(`
-      <img class="full" src="${objUrl(photo.blob)}" alt="">
+      <img class="full" alt="">
       <div class="row spread">
         <button class="btn primary" data-act="ai">✨ Identify items</button>
         <button class="btn danger" data-act="del">Delete photo</button>
         <button class="btn" data-close>Close</button>
       </div>`);
+    db.fullBlob(photo)
+      .then((b) => (m.el.querySelector('.full').src = objUrl(b)))
+      .catch(() => toast("Couldn't load that photo."));
     m.el.querySelector('[data-act=ai]').addEventListener('click', () => {
       m.close();
       identify(photo);
     });
     m.el.querySelector('[data-act=del]').addEventListener('click', async () => {
       if (!confirm('Delete this photo?')) return;
-      await db.deletePhoto(photo.id);
+      try {
+        await db.deletePhoto(photo);
+      } catch (err) {
+        toast(err.message);
+        return;
+      }
       photos = photos.filter((p) => p !== photo);
       m.close();
       renderPhotos();
@@ -369,7 +404,7 @@ async function boxView(code) {
   });
 
   // --- AI: identify items in a photo ---
-  async function identify(photo) {
+  async function identify(photo, blob) {
     if (!ai.hasKey()) {
       toast('Add your Gemini API key in Settings first.');
       return;
@@ -377,7 +412,7 @@ async function boxView(code) {
     const m = modal(`<div class="center pad"><div class="spinner"></div><p>Gemini is looking at your photo…</p></div>`);
     let result;
     try {
-      result = await ai.identifyItems(photo.blob, box.items);
+      result = await ai.identifyItems(blob || (await db.fullBlob(photo)), box.items);
     } catch (err) {
       m.el.querySelector('.sheet-panel').innerHTML = `<p class="error">${esc(err.message)}</p><div class="row"><button class="btn" data-close>OK</button></div>`;
       return;
@@ -406,24 +441,28 @@ async function boxView(code) {
         <button class="btn primary" id="ai-add">Add to box</button>
         <button class="btn" data-close>Cancel</button>
       </div>`;
-    m.el.querySelector('#ai-add').addEventListener('click', () => {
+    m.el.querySelector('#ai-add').addEventListener('click', async (e) => {
       const el = m.el;
+      const picked = [];
       result.items.forEach((it, n) => {
         if (!el.querySelector(`[data-n="${n}"]`).checked) return;
         const name = el.querySelector(`[data-name="${n}"]`).value.trim();
         const qty = Math.max(1, Number(el.querySelector(`[data-qty="${n}"]`).value) || 1);
-        if (!name) return;
-        const existing = box.items.find((x) => x.name.toLowerCase() === name.toLowerCase());
-        if (existing) existing.qty += qty;
-        else box.items.push(db.newItem({ name, qty, category: it.category }));
+        if (name) picked.push({ name, qty, category: it.category });
       });
-      const useName = el.querySelector('#use-name');
-      if (useName?.checked) {
-        box.name = result.boxName;
-        $('#name').value = box.name;
-      }
-      save();
-      renderItems();
+      const newName = el.querySelector('#use-name')?.checked ? result.boxName : null;
+      e.target.disabled = true;
+      const ok = await change((b) => {
+        for (const p of picked) {
+          const existing = b.items.find((x) => x.name.toLowerCase() === p.name.toLowerCase());
+          if (existing) existing.qty += p.qty;
+          else b.items.push(db.newItem(p));
+        }
+        if (newName && !b.name) b.name = newName;
+      });
+      e.target.disabled = false;
+      if (!ok) return;
+      $('#name').value = box.name;
       m.close();
       toast('Items added');
     });
@@ -431,7 +470,12 @@ async function boxView(code) {
 
   $('#del').addEventListener('click', async () => {
     if (!confirm(`Delete ${box.code}${box.name ? ` (${box.name})` : ''} and all its photos? This can't be undone.`)) return;
-    await db.deleteBox(box.code);
+    try {
+      await db.deleteBox(box.code);
+    } catch (err) {
+      toast(err.message);
+      return;
+    }
     toast(`${box.code} deleted`);
     go('#/');
   });
@@ -455,8 +499,9 @@ async function scanView() {
 
   $('#manual').addEventListener('submit', (e) => {
     e.preventDefault();
-    const code = parseCode(e.target.code.value) || e.target.code.value.trim().toUpperCase();
+    const code = parseCode(e.target.code.value);
     if (code) go(`#/box/${encodeURIComponent(code)}`);
+    else toast('Codes look like BOX-007');
   });
 
   const status = $('#status');
@@ -616,7 +661,12 @@ async function labelsView(params) {
   });
   $('#mkblank').addEventListener('click', async () => {
     const n = Math.min(100, Math.max(1, Number($('#nblank').value) || 1));
-    blanks.push(...(await db.reserveCodes(n)));
+    try {
+      blanks.push(...(await db.reserveCodes(n)));
+    } catch (err) {
+      toast(err.message);
+      return;
+    }
     render();
     toast(`Added ${n} blank label${n === 1 ? '' : 's'}`);
   });
@@ -677,18 +727,25 @@ async function settingsView() {
   let usage = '';
   try {
     const est = await navigator.storage?.estimate?.();
-    if (est?.usage != null) usage = `${(est.usage / 1048576).toFixed(1)} MB used on this device.`;
-    if (await navigator.storage?.persisted?.()) usage += ' Storage is protected from automatic cleanup.';
+    if (est?.usage != null) usage = `This phone's offline copy uses ${(est.usage / 1048576).toFixed(1)} MB.`;
   } catch {
     /* ignore */
   }
+  const session = await db.getSession();
+  const cfg = db.getConfig();
 
   view.innerHTML = `
     <h1>Settings</h1>
 
     <section>
+      <h2>Account</h2>
+      <p class="small">Signed in as <b>${esc(session?.user?.email)}</b>. Everyone in your household sees the same boxes and photos.</p>
+      <div class="row"><button class="btn" id="signout">Sign out</button></div>
+    </section>
+
+    <section>
       <h2>Gemini AI</h2>
-      <p class="muted small">Get a free API key at <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com/apikey</a>, then paste it here. It's stored only on this device and sent only to Google.</p>
+      <p class="muted small">Get a free API key at <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com/apikey</a> and paste it here. It's shared with your household, so it only needs entering once.</p>
       <label class="field"><span>API key</span>
         <div class="row tight"><input id="key" type="password" value="${esc(settings.apiKey)}" placeholder="AIza…" autocomplete="off" spellcheck="false">
         <button class="btn small" id="show" type="button">Show</button></div>
@@ -700,41 +757,67 @@ async function settingsView() {
 
     <section>
       <h2>Backup</h2>
-      <p class="muted small">Your inventory lives on this phone. Export a backup now and then (it includes photos), and use Import to move it to another device. ${esc(usage)}</p>
+      <p class="muted small">Everything is stored in your Supabase project. A backup file (with photos) is extra insurance. ${esc(usage)}</p>
       <div class="row">
         <button class="btn" id="export">⬇️ Export backup</button>
         <label class="btn">⬆️ Import backup<input type="file" accept="application/json,.json" class="visually-hidden" id="import"></label>
       </div>
+      <p class="small" id="progress"></p>
     </section>
 
     <section>
       <h2>Install on your phone</h2>
       <p class="small"><b>iPhone:</b> open this page in Safari → Share button → <i>Add to Home Screen</i>.<br>
       <b>Android:</b> open in Chrome → ⋮ menu → <i>Install app</i> (or <i>Add to Home screen</i>).</p>
-    </section>`;
+    </section>
+
+    ${
+      cfg.fromFile
+        ? ''
+        : `<section><h2>Supabase connection</h2><p class="muted small">Connected to ${esc(cfg.url)}.</p>
+           <button class="btn small" id="reconfig">Change connection</button></section>`
+    }`;
+
+  $('#signout').addEventListener('click', async () => {
+    await db.signOut();
+    location.hash = '#/';
+    boot();
+  });
+  $('#reconfig')?.addEventListener('click', () => {
+    if (!confirm('Disconnect from this Supabase project on this phone?')) return;
+    localStorage.removeItem('gi-sb-url');
+    localStorage.removeItem('gi-sb-key');
+    db.signOut().finally(() => location.reload());
+  });
 
   const key = $('#key');
-  key.addEventListener('change', () => {
+  key.addEventListener('change', async () => {
     settings.apiKey = key.value.trim();
     saveSettings();
-    toast('API key saved');
+    try {
+      await db.setHouseholdSetting('gemini_api_key', settings.apiKey);
+      toast('API key saved for the household');
+    } catch (err) {
+      toast(err.message);
+    }
   });
   $('#show').addEventListener('click', (e) => {
     key.type = key.type === 'password' ? 'text' : 'password';
     e.target.textContent = key.type === 'password' ? 'Show' : 'Hide';
   });
-  $('#model').addEventListener('change', (e) => {
+  $('#model').addEventListener('change', async (e) => {
     settings.model = e.target.value.trim() || DEFAULT_MODEL;
     e.target.value = settings.model;
     saveSettings();
+    db.setHouseholdSetting('gemini_model', settings.model).catch((err) => toast(err.message));
   });
   $('#auto').addEventListener('change', (e) => {
     settings.autoIdentify = e.target.checked;
     saveSettings();
   });
   $('#test').addEventListener('click', async () => {
+    if (key.value.trim() !== settings.apiKey) key.dispatchEvent(new Event('change'));
     settings.apiKey = key.value.trim();
-    saveSettings();
     const out = $('#test-out');
     out.textContent = 'Testing…';
     out.className = 'small';
@@ -747,8 +830,19 @@ async function settingsView() {
       out.className = 'small error';
     }
   });
-  $('#export').addEventListener('click', async () => {
-    const data = await db.exportAll();
+  const progress = (label) => (i, n) => ($('#progress').textContent = `${label} photo ${i} of ${n}…`);
+  $('#export').addEventListener('click', async (e) => {
+    e.target.disabled = true;
+    let data;
+    try {
+      data = await db.exportAll(progress('Downloading'));
+    } catch (err) {
+      toast(err.message);
+      return;
+    } finally {
+      e.target.disabled = false;
+      $('#progress').textContent = '';
+    }
     const blob = new Blob([JSON.stringify(data)], { type: 'application/json' });
     const name = `garage-inventory-${new Date().toISOString().slice(0, 10)}.json`;
     const file = new File([blob], name, { type: 'application/json' });
@@ -771,17 +865,215 @@ async function settingsView() {
     e.target.value = '';
     if (!file) return;
     try {
-      const res = await db.importAll(JSON.parse(await file.text()));
+      const res = await db.importAll(JSON.parse(await file.text()), progress('Uploading'));
       toast(`Imported ${res.boxes} boxes and ${res.photos} photos`);
     } catch (err) {
       toast(err.message || 'Import failed');
+    } finally {
+      $('#progress').textContent = '';
     }
   });
 }
 
+// ---------- sign-in & first-run screens ----------
+
+function gate(html) {
+  ready = false;
+  document.body.classList.add('signed-out');
+  view.innerHTML = `<div class="gate">${html}</div>`;
+}
+
+function setupScreen() {
+  gate(`
+    <h1>Connect to Supabase</h1>
+    <p class="muted small">One-time setup. In Supabase open your project → <b>Project Settings → API</b> and copy the Project URL and the <b>anon</b> (or <b>publishable</b>) key.
+    To skip this step on every phone, put them in <code>js/config.js</code> instead.</p>
+    <form id="cfg">
+      <label class="field"><span>Project URL</span><input name="url" type="url" required placeholder="https://xxxx.supabase.co" autocapitalize="off" spellcheck="false"></label>
+      <label class="field"><span>Anon / publishable key</span><input name="key" required autocapitalize="off" spellcheck="false"></label>
+      <button class="btn primary big">Connect</button>
+    </form>`);
+  $('#cfg').addEventListener('submit', (e) => {
+    e.preventDefault();
+    db.saveConfig(e.target.url.value, e.target.key.value);
+    boot();
+  });
+}
+
+function loginScreen(message = '') {
+  gate(`
+    <div class="center"><img src="icons/icon-192.png" width="72" height="72" alt="" class="gate-icon"></div>
+    <h1 class="center">Garage Inventory</h1>
+    <p class="muted center small">Sign in to see your household's boxes.</p>
+    ${message ? `<p class="notice small">${message}</p>` : ''}
+    <form id="login">
+      <label class="field"><span>Email</span><input name="email" type="email" required autocomplete="username" autocapitalize="off"></label>
+      <label class="field"><span>Password</span><input name="password" type="password" required minlength="6" autocomplete="current-password"></label>
+      <button class="btn primary big" name="signin">Sign in</button>
+      <div class="row spread">
+        <button class="btn small" type="button" id="signup">Create account</button>
+        <button class="btn small" type="button" id="forgot">Forgot password?</button>
+      </div>
+    </form>
+    <p class="error small" id="login-err"></p>`);
+  const form = $('#login');
+  const err = $('#login-err');
+  const busy = async (fn) => {
+    err.textContent = '';
+    form.querySelectorAll('button').forEach((b) => (b.disabled = true));
+    try {
+      await fn();
+    } catch (e) {
+      err.textContent = e.message;
+    } finally {
+      form.querySelectorAll('button').forEach((b) => (b.disabled = false));
+    }
+  };
+  form.addEventListener('submit', (e) => {
+    e.preventDefault();
+    busy(async () => {
+      await db.signIn(form.email.value.trim(), form.password.value);
+      await boot();
+    });
+  });
+  $('#signup').addEventListener('click', () => {
+    if (!form.reportValidity()) return;
+    busy(async () => {
+      const res = await db.signUp(form.email.value.trim(), form.password.value);
+      if (res.session) await boot();
+      else loginScreen(`Almost done: check <b>${esc(form.email.value.trim())}</b> for a confirmation email, tap the link, then come back here and sign in.`);
+    });
+  });
+  $('#forgot').addEventListener('click', () => {
+    if (!form.email.reportValidity()) return;
+    busy(async () => {
+      await db.resetPassword(form.email.value.trim());
+      err.textContent = '';
+      loginScreen('We sent you an email with a link to set a new password.');
+    });
+  });
+}
+
+function newPasswordScreen() {
+  gate(`
+    <h1>Choose a new password</h1>
+    <form id="pw">
+      <label class="field"><span>New password</span><input name="password" type="password" required minlength="6" autocomplete="new-password"></label>
+      <button class="btn primary big">Save password</button>
+    </form>
+    <p class="error small" id="pw-err"></p>`);
+  $('#pw').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    try {
+      await db.setPassword(e.target.password.value);
+      toast('Password updated');
+      boot();
+    } catch (err) {
+      $('#pw-err').textContent = err.message;
+    }
+  });
+}
+
+function notMemberScreen(email) {
+  gate(`
+    <h1>Not on the household list</h1>
+    <p><b>${esc(email)}</b> is signed in, but it isn't one of the household's email addresses yet.</p>
+    <p class="small muted">In Supabase, open <b>Table Editor → household_members</b> and add this email (or add it to the last lines of <code>supabase/setup.sql</code> and run it again). Then tap Try again.</p>
+    <div class="row"><button class="btn primary" id="retry">Try again</button><button class="btn" id="out">Sign out</button></div>`);
+  $('#retry').addEventListener('click', () => boot());
+  $('#out').addEventListener('click', async () => {
+    await db.signOut();
+    boot();
+  });
+}
+
+// ---------- live updates from other phones ----------
+
+let refreshTimer;
+function refreshSoon() {
+  clearTimeout(refreshTimer);
+  refreshTimer = setTimeout(() => {
+    if (!ready || document.querySelector('.modal')) return;
+    const a = document.activeElement;
+    if (a && view.contains(a) && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName)) return; // don't yank the page while someone's typing
+    const h = location.hash || '#/';
+    if (h === '#/' || h.startsWith('#/box/')) router({ keepScroll: true });
+  }, 700);
+}
+
+db.onStatus?.((isOnline) => document.body.classList.toggle('offline', !isOnline));
+window.addEventListener('online', () => document.body.classList.remove('offline'));
+window.addEventListener('offline', () => document.body.classList.add('offline'));
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') refreshSoon();
+});
+
 // ---------- start ----------
 
-router();
+let unsubscribe = null;
+let booting = null;
+
+async function boot() {
+  if (booting) return booting;
+  booting = (async () => {
+    unsubscribe?.();
+    unsubscribe = null;
+    if (!db.sb && !db.connect()) return setupScreen();
+
+    let session;
+    try {
+      session = await db.getSession();
+    } catch {
+      session = null;
+    }
+    // Supabase sign-in links put tokens in the URL hash; clear them so the router doesn't see them.
+    if (/access_token|error_description|type=/.test(location.hash)) history.replaceState(null, '', location.pathname + '#/');
+    if (recovering) return newPasswordScreen();
+    if (!session) return loginScreen();
+
+    let member = false;
+    try {
+      member = await db.isMember();
+    } catch (err) {
+      if (!navigator.onLine || /fetch|network|load failed/i.test(err.message)) member = true; // offline: trust the cached session
+      else return loginScreen(esc(err.message));
+    }
+    if (!member) return notMemberScreen(session.user.email);
+
+    try {
+      const hs = await db.getHouseholdSettings();
+      if (hs.gemini_api_key != null) settings.apiKey = hs.gemini_api_key;
+      if (hs.gemini_model) settings.model = hs.gemini_model;
+      saveSettings();
+    } catch {
+      /* offline: use the copy saved on this phone */
+    }
+
+    document.body.classList.remove('signed-out');
+    unsubscribe = db.subscribe(() => {
+      if (Date.now() - db.lastLocalWrite > 2500) refreshSoon();
+    });
+    ready = true;
+    await router();
+  })().finally(() => {
+    booting = null;
+  });
+  return booting;
+}
+
+let recovering = false;
+if (db.connect()) {
+  db.sb.auth.onAuthStateChange((event) => {
+    if (event === 'PASSWORD_RECOVERY') {
+      recovering = true;
+      setTimeout(() => {
+        recovering = false;
+        newPasswordScreen();
+      });
+    }
+  });
+}
+boot();
 
 if ('serviceWorker' in navigator && location.protocol === 'https:') {
   navigator.serviceWorker.register('sw.js').catch(() => {});

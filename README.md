@@ -6,12 +6,27 @@ A phone app (installable website) for knowing what's in every box in your garage
 - **Photos** – snap what's inside each box.
 - **AI** – Gemini looks at your photos and lists the items for you, and answers questions like *"where are the jumper cables?"*
 - **Search** – find any item across all boxes instantly.
-- **Works offline** – everything except the AI works without internet.
-- **Private** – your inventory and photos stay on your phone. Nothing goes anywhere except the photos/questions you send to Gemini.
+- **Shared household** – everyone signs in on their own phone and sees the same boxes and photos, with changes showing up live.
+- **Works offline** – a copy is kept on each phone, so you can browse and search with no signal (changes need internet).
+- **Private** – data is stored in your own Supabase project and only the email addresses you list can see it.
 
-No server, no build step, no account. It's plain HTML/CSS/JavaScript.
+No server to run and no build step. It's plain HTML/CSS/JavaScript, with [Supabase](https://supabase.com) (free plan) for the shared database and photo storage.
 
-## Put it online (GitHub Pages, free)
+## 1. Set up Supabase (once)
+
+1. In Supabase, create a project (or use an existing one).
+2. Open `supabase/setup.sql`, change the two email addresses at the bottom to the people in your household.
+3. Supabase dashboard → **SQL Editor** → **New query** → paste the whole file → **Run**.
+   This creates the tables, the private `photos` storage bucket, and the security rules.
+4. **Authentication → URL Configuration**: set **Site URL** to your app's address (from step 2 below,
+   e.g. `https://<your-username>.github.io/garage-inventory/`). This is where confirmation and password-reset emails send people.
+5. **Project Settings → API**: copy the **Project URL** and the **anon** (or **publishable**) key into `js/config.js`.
+   These are meant to be public; the security rules are what protect your data. **Never** use the `service_role`/secret key here.
+   (If you leave `config.js` empty, the app asks for them on first launch instead.)
+
+To add someone later, add their email in **Table Editor → household_members**.
+
+## 2. Put it online (GitHub Pages, free)
 
 The camera and "install to home screen" need HTTPS, which GitHub Pages provides.
 
@@ -19,19 +34,21 @@ The camera and "install to home screen" need HTTPS, which GitHub Pages provides.
 2. In the repo on GitHub: **Settings → Pages → Build and deployment → Source: Deploy from a branch**, branch **`main`**, folder **`/ (root)`** → **Save**.
 3. After a minute your app is at `https://<your-username>.github.io/garage-inventory/`.
 
-> GitHub Pages on a free account needs the repo to be **public**. That's fine — the code is public, but your inventory data and API key are never stored in the repo.
+> GitHub Pages on a free account needs the repo to be **public**. That's fine — the code is public, but your inventory, photos and Gemini key live in Supabase behind sign-in.
 
-## Install it on your phone
+## 3. Install it on each phone
 
 - **iPhone:** open the link in **Safari** → Share button → **Add to Home Screen**.
 - **Android:** open in **Chrome** → ⋮ menu → **Install app**.
 
-## Turn on the AI (Gemini)
+Then tap **Create account** with one of the household emails, confirm via the email Supabase sends, and sign in.
+
+## 4. Turn on the AI (Gemini)
 
 1. Go to <https://aistudio.google.com/apikey> and create a free API key.
 2. In the app: **Settings → API key**, paste it, tap **Test key**.
 
-The key is saved only on your phone and sent only to Google. The default model is `gemini-flash-latest`; you can change it in Settings.
+The key is shared with your household (stored in Supabase, readable only by members), so only one person needs to enter it. The default model is `gemini-flash-latest`; you can change it in Settings.
 
 ## How to use it
 
@@ -45,9 +62,9 @@ The key is saved only on your phone and sent only to Google. The default model i
 
 ## Backups
 
-Data lives in your phone's browser storage. Use **Settings → Export backup** now and then (it includes photos). **Import backup** restores it or moves it to another device.
+Everything is stored in Supabase. **Settings → Export backup** downloads a file with all boxes and photos as extra insurance; **Import backup** uploads one.
 
-> On iPhone, delete the home-screen app only if you've exported a backup — removing it can clear its data.
+> Supabase pauses free projects after a week with no activity. Just open the dashboard and click **Restore** if that happens — nothing is lost.
 
 ## Project layout
 
@@ -55,12 +72,14 @@ Data lives in your phone's browser storage. Use **Settings → Export backup** n
 index.html            app shell
 css/app.css           styles (light/dark, print layout for labels)
 js/app.js             screens: boxes, box detail, scan, labels, ask, settings
-js/db.js              on-device database (IndexedDB) + backup/restore
+js/config.js          your Supabase URL + anon key
+js/db.js              Supabase data/auth/storage + offline copy (IndexedDB) + backup
+supabase/setup.sql    one-time database setup (tables, storage bucket, security rules)
 js/gemini.js          Gemini API calls (photo → items, questions)
 js/qr.js              QR label generation and parsing
 js/image.js           photo resizing
 sw.js                 offline cache
-vendor/               qrcode-generator (MIT), jsQR (Apache-2.0)
+vendor/               qrcode-generator (MIT), jsQR (Apache-2.0), supabase-js (MIT)
 ```
 
 When you change files, bump `CACHE` in `sw.js` so installed phones pick up the new version.

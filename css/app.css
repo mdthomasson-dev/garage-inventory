@@ -208,3 +208,15 @@ mark { background: var(--accent-soft); color: inherit; border-radius: 3px; paddi
   #print-sheet { padding: 0; border-radius: 0; }
   main { padding: 0; max-width: none; }
 }
+
+/* sign-in, offline, uploads */
+body.signed-out .tabs { display: none; }
+.gate { max-width: 420px; margin: 24px auto; }
+.gate-icon { border-radius: 16px; }
+code { font-size: 0.85em; background: var(--bg); border: 1px solid var(--border); border-radius: 4px; padding: 0 4px; }
+body.offline .topbar::after {
+  content: "Offline · showing the copy saved on this phone";
+  display: block; font-size: 0.75rem; font-weight: 600; color: #fde68a; margin-top: 4px;
+}
+.photo.uploading { display: grid; place-items: center; background: var(--bg); border-radius: 8px; }
+.photo.uploading .spinner { width: 28px; height: 28px; margin: 0; }

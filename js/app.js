@@ -540,6 +540,7 @@ async function boxView(code) {
       <div class="row spread">
         <button class="btn primary" data-act="ai">✨ Identify items</button>
         <button class="btn" data-act="rot">↻ Rotate</button>
+        <button class="btn" data-act="flip">⇋ Flip</button>
         <button class="btn danger" data-act="del">Delete photo</button>
         <button class="btn" data-close>Close</button>
       </div>`);
@@ -550,15 +551,16 @@ async function boxView(code) {
       m.close();
       startIdentify(box.code, photo, null, box.items);
     });
-    m.el.querySelector('[data-act=rot]').addEventListener('click', async (e) => {
-      const btn = e.currentTarget;
-      btn.disabled = true;
-      btn.textContent = 'Rotating…';
+    // Rotate a quarter turn clockwise, or flip left-to-right, and save the photo that way.
+    const fixPhoto = async (btn, how) => {
+      const label = btn.textContent;
+      m.el.querySelectorAll('[data-act]').forEach((x) => (x.disabled = true));
+      btn.textContent = 'Saving…';
       try {
         const current = photos.find((p) => p.id === photo.id) || photo;
         const full = await db.fullBlob(current);
-        const blob = await resizeImage(full, 1600, 0.85, { turn: 1 });
-        const thumb = await resizeImage(full, 360, 0.7, { turn: 1 });
+        const blob = await resizeImage(full, 1600, 0.85, how);
+        const thumb = await resizeImage(full, 360, 0.7, how);
         const updated = await db.replacePhoto(current, blob, thumb);
         photos = photos.map((p) => (p.id === updated.id ? updated : p));
         Object.assign(photo, updated);
@@ -567,10 +569,12 @@ async function boxView(code) {
       } catch (err) {
         toast(err.message);
       } finally {
-        btn.disabled = false;
-        btn.textContent = '↻ Rotate';
+        m.el.querySelectorAll('[data-act]').forEach((x) => (x.disabled = false));
+        btn.textContent = label;
       }
-    });
+    };
+    m.el.querySelector('[data-act=rot]').addEventListener('click', (e) => fixPhoto(e.currentTarget, { turn: 1 }));
+    m.el.querySelector('[data-act=flip]').addEventListener('click', (e) => fixPhoto(e.currentTarget, { mirror: true }));
     m.el.querySelector('[data-act=del]').addEventListener('click', async () => {
       if (!confirm('Delete this photo?')) return;
       try {
@@ -811,25 +815,31 @@ async function sectionView(id) {
     $('#sec-photo').addEventListener('click', () => {
       if (!img.src) return;
       const m = modal(`<img class="full" src="${img.src}" alt="">
-        <div class="row spread"><button class="btn" data-act="rot">↻ Rotate</button><button class="btn" data-close>Close</button></div>`);
-      m.el.querySelector('[data-act=rot]').addEventListener('click', async (e) => {
-        const btn = e.currentTarget;
-        btn.disabled = true;
-        btn.textContent = 'Rotating…';
+        <div class="row spread">
+          <button class="btn" data-act="rot">↻ Rotate</button>
+          <button class="btn" data-act="flip">⇋ Flip</button>
+          <button class="btn" data-close>Close</button>
+        </div>`);
+      const fixSectionPhoto = async (btn, how) => {
+        const label = btn.textContent;
+        m.el.querySelectorAll('[data-act]').forEach((x) => (x.disabled = true));
+        btn.textContent = 'Saving…';
         try {
           const full = await db.sectionPhoto(sec);
-          const blob = await resizeImage(full, 1600, 0.85, { turn: 1 });
-          sec = await db.setSectionPhoto(sec, blob, await resizeImage(full, 480, 0.75, { turn: 1 }));
+          const blob = await resizeImage(full, 1600, 0.85, how);
+          sec = await db.setSectionPhoto(sec, blob, await resizeImage(full, 480, 0.75, how));
           const url = objUrl(blob);
           m.el.querySelector('.full').src = url;
           img.src = url;
         } catch (err) {
           toast(err.message);
         } finally {
-          btn.disabled = false;
-          btn.textContent = '↻ Rotate';
+          m.el.querySelectorAll('[data-act]').forEach((x) => (x.disabled = false));
+          btn.textContent = label;
         }
-      });
+      };
+      m.el.querySelector('[data-act=rot]').addEventListener('click', (e) => fixSectionPhoto(e.currentTarget, { turn: 1 }));
+      m.el.querySelector('[data-act=flip]').addEventListener('click', (e) => fixSectionPhoto(e.currentTarget, { mirror: true }));
     });
   }
 
@@ -1424,6 +1434,13 @@ async function settingsView() {
     </section>
 
     <section>
+      <h2>Photo check</h2>
+      <p class="muted small">If photos come out upside down, sideways or mirrored, take a test photo here. It isn't saved anywhere; it just shows what your phone does, so the problem can be fixed.</p>
+      <label class="btn">📷 Take a test photo<input type="file" accept="image/*" capture="environment" class="visually-hidden" id="diag"></label>
+      <div id="diag-out"></div>
+    </section>
+
+    <section>
       <h2>Install on your phone</h2>
       <p class="small"><b>iPhone:</b> open this page in Safari → Share button → <i>Add to Home Screen</i>.<br>
       <b>Android:</b> open in Chrome → ⋮ menu → <i>Install app</i> (or <i>Add to Home screen</i>).</p>
@@ -1435,6 +1452,38 @@ async function settingsView() {
         : `<section><h2>Supabase connection</h2><p class="muted small">Connected to ${esc(cfg.url)}.</p>
            <button class="btn small" id="reconfig">Change connection</button></section>`
     }`;
+
+  $('#diag').addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    e.target.value = '';
+    if (!file) return;
+    const out = $('#diag-out');
+    out.innerHTML = '<p class="muted small">Checking…</p>';
+    try {
+      const { photoDiagnostics } = await import('./image.js');
+      const d = await photoDiagnostics(file);
+      const saved = await resizeImage(file, 600);
+      const report = `Photo check: browser turns photos=${d.browserTurnsPhotos ? 'yes' : 'no'}, camera note=${d.exifOrientation}, decoded=${d.decoded}, type=${d.type}, ${d.sizeKB} KB. ${d.userAgent}`;
+      out.innerHTML = `
+        <div class="diag-pics">
+          <figure><img src="${objUrl(file)}" alt=""><figcaption>As your phone shows it</figcaption></figure>
+          <figure><img src="${objUrl(saved)}" alt=""><figcaption>As the app would save it</figcaption></figure>
+        </div>
+        <p class="small">If the two pictures don't match, copy this report and paste it into your chat with Claude:</p>
+        <textarea readonly rows="4" class="small" id="diag-text">${esc(report)}</textarea>
+        <button class="btn small" id="diag-copy" type="button">Copy</button>`;
+      $('#diag-copy').addEventListener('click', async () => {
+        try {
+          await navigator.clipboard.writeText(report);
+          toast('Copied');
+        } catch {
+          $('#diag-text').select();
+        }
+      });
+    } catch (err) {
+      out.innerHTML = `<p class="error small">${esc(err.message)}</p>`;
+    }
+  });
 
   $('#signout').addEventListener('click', async () => {
     await db.signOut();

@@ -57,7 +57,7 @@ async function browserAppliesOrientation() {
  * Draws an image scaled to at most `max` px, applying EXIF orientation `o` (1-8) and then
  * `turn` extra quarter turns clockwise. `srcW`/`srcH` are the image's pixel size as decoded.
  */
-export function orientedCanvas(img, srcW, srcH, o, max, turn = 0) {
+export function orientedCanvas(img, srcW, srcH, o, max, turn = 0, mirror = false) {
   const scale = Math.min(1, max / Math.max(srcW, srcH));
   const w = Math.round(srcW * scale);
   const h = Math.round(srcH * scale);
@@ -68,7 +68,11 @@ export function orientedCanvas(img, srcW, srcH, o, max, turn = 0) {
   canvas.width = sideways ? h : w;
   canvas.height = sideways ? w : h;
   const ctx = canvas.getContext('2d');
-  // User turn first (outermost), then the EXIF fix.
+  // Outermost first: the user's left-right flip, then the user's turn, then the EXIF fix.
+  if (mirror) {
+    ctx.translate(canvas.width, 0);
+    ctx.scale(-1, 1);
+  }
   if (quarter) {
     ctx.translate(canvas.width / 2, canvas.height / 2);
     ctx.rotate((quarter * Math.PI) / 2);
@@ -89,7 +93,7 @@ export function orientedCanvas(img, srcW, srcH, o, max, turn = 0) {
 }
 
 /** Shrinks a photo to at most `max` pixels on its long side, the right way up, as a JPEG Blob. */
-export async function resizeImage(file, max, quality = 0.82, { turn = 0 } = {}) {
+export async function resizeImage(file, max, quality = 0.82, { turn = 0, mirror = false } = {}) {
   const url = URL.createObjectURL(file);
   try {
     const img = new Image();
@@ -97,10 +101,30 @@ export async function resizeImage(file, max, quality = 0.82, { turn = 0 } = {}) 
     await img.decode();
     // EXIF orientation we still have to apply ourselves (1 = nothing to do).
     const o = (await browserAppliesOrientation()) ? 1 : await exifOrientation(file);
-    const canvas = orientedCanvas(img, img.naturalWidth, img.naturalHeight, o, max, turn);
+    const canvas = orientedCanvas(img, img.naturalWidth, img.naturalHeight, o, max, turn, mirror);
     return await new Promise((resolve, reject) =>
       canvas.toBlob((b) => (b ? resolve(b) : reject(new Error('Could not process that image.'))), 'image/jpeg', quality),
     );
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+/** What this phone does with a photo — shown in Settings so problems can be diagnosed. */
+export async function photoDiagnostics(file) {
+  const url = URL.createObjectURL(file);
+  try {
+    const img = new Image();
+    img.src = url;
+    await img.decode();
+    return {
+      browserTurnsPhotos: await browserAppliesOrientation(),
+      exifOrientation: await exifOrientation(file),
+      decoded: `${img.naturalWidth}x${img.naturalHeight}`,
+      type: file.type || 'unknown',
+      sizeKB: Math.round(file.size / 1024),
+      userAgent: navigator.userAgent,
+    };
   } finally {
     URL.revokeObjectURL(url);
   }

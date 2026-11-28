@@ -539,6 +539,7 @@ async function boxView(code) {
       <img class="full" alt="">
       <div class="row spread">
         <button class="btn primary" data-act="ai">✨ Identify items</button>
+        <button class="btn" data-act="rot">↻ Rotate</button>
         <button class="btn danger" data-act="del">Delete photo</button>
         <button class="btn" data-close>Close</button>
       </div>`);
@@ -548,6 +549,27 @@ async function boxView(code) {
     m.el.querySelector('[data-act=ai]').addEventListener('click', () => {
       m.close();
       startIdentify(box.code, photo, null, box.items);
+    });
+    m.el.querySelector('[data-act=rot]').addEventListener('click', async (e) => {
+      const btn = e.currentTarget;
+      btn.disabled = true;
+      btn.textContent = 'Rotating…';
+      try {
+        const current = photos.find((p) => p.id === photo.id) || photo;
+        const full = await db.fullBlob(current);
+        const blob = await resizeImage(full, 1600, 0.85, { turn: 1 });
+        const thumb = await resizeImage(full, 360, 0.7, { turn: 1 });
+        const updated = await db.replacePhoto(current, blob, thumb);
+        photos = photos.map((p) => (p.id === updated.id ? updated : p));
+        Object.assign(photo, updated);
+        m.el.querySelector('.full').src = objUrl(blob);
+        renderPhotos();
+      } catch (err) {
+        toast(err.message);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = '↻ Rotate';
+      }
     });
     m.el.querySelector('[data-act=del]').addEventListener('click', async () => {
       if (!confirm('Delete this photo?')) return;
@@ -787,7 +809,27 @@ async function sectionView(id) {
       .then((b) => img.isConnected && (img.src = objUrl(b)))
       .catch(() => fillSectionThumb(img, sec));
     $('#sec-photo').addEventListener('click', () => {
-      if (img.src) modal(`<img class="full" src="${img.src}" alt=""><div class="row"><button class="btn" data-close>Close</button></div>`);
+      if (!img.src) return;
+      const m = modal(`<img class="full" src="${img.src}" alt="">
+        <div class="row spread"><button class="btn" data-act="rot">↻ Rotate</button><button class="btn" data-close>Close</button></div>`);
+      m.el.querySelector('[data-act=rot]').addEventListener('click', async (e) => {
+        const btn = e.currentTarget;
+        btn.disabled = true;
+        btn.textContent = 'Rotating…';
+        try {
+          const full = await db.sectionPhoto(sec);
+          const blob = await resizeImage(full, 1600, 0.85, { turn: 1 });
+          sec = await db.setSectionPhoto(sec, blob, await resizeImage(full, 480, 0.75, { turn: 1 }));
+          const url = objUrl(blob);
+          m.el.querySelector('.full').src = url;
+          img.src = url;
+        } catch (err) {
+          toast(err.message);
+        } finally {
+          btn.disabled = false;
+          btn.textContent = '↻ Rotate';
+        }
+      });
     });
   }
 

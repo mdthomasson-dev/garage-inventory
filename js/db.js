@@ -254,7 +254,7 @@ export async function deleteBox(code) {
     check(await sb.from('garage_boxes').delete().eq('code', code));
     await cacheDelete('boxes', [code]);
     await cacheDelete('photos', photos.map((p) => p.id));
-    await cacheDelete('blobs', photos.flatMap((p) => [`t:${p.id}`, `f:${p.id}`]));
+    await cacheDelete('blobs', paths.map((x) => `p:${x}`));
   });
 }
 
@@ -334,8 +334,8 @@ export async function addPhoto({ boxCode, blob, thumb }) {
     const photo = toPhoto(row);
     await cachePut('photos', [photo]);
     await tx(['blobs'], 'readwrite', (t) => {
-      t.objectStore('blobs').put(thumb, `t:${id}`);
-      t.objectStore('blobs').put(blob, `f:${id}`);
+      t.objectStore('blobs').put(thumb, `p:${thumbPath}`);
+      t.objectStore('blobs').put(blob, `p:${path}`);
     });
     return photo;
   });
@@ -346,18 +346,35 @@ export async function deletePhoto(photo) {
     check(await sb.storage.from(BUCKET).remove([photo.path, photo.thumbPath]));
     check(await sb.from('garage_photos').delete().eq('id', photo.id));
     await cacheDelete('photos', [photo.id]);
-    await cacheDelete('blobs', [`t:${photo.id}`, `f:${photo.id}`]);
+    await cacheDelete('blobs', [`p:${photo.path}`, `p:${photo.thumbPath}`]);
   });
 }
 
-async function photoBlob(photo, full) {
-  const key = `${full ? 'f' : 't'}:${photo.id}`;
-  const cached = await tx(['blobs'], 'readonly', (t) => req(t.objectStore('blobs').get(key)));
-  if (cached) return cached;
-  const blob = check(await sb.storage.from(BUCKET).download(full ? photo.path : photo.thumbPath));
-  await tx(['blobs'], 'readwrite', (t) => t.objectStore('blobs').put(blob, key));
-  return blob;
+/** Swaps a photo's image for a new one (e.g. after rotating it). The new files get new names, so
+ *  every phone's offline copy of the old picture is simply replaced. */
+export async function replacePhoto(photo, blob, thumb) {
+  return write(async () => {
+    const stamp = Date.now().toString(36);
+    const path = `${photo.id}-${stamp}.jpg`;
+    const thumbPath = `${photo.id}-${stamp}-thumb.jpg`;
+    const opts = { contentType: 'image/jpeg', upsert: false };
+    check(await sb.storage.from(BUCKET).upload(path, blob, opts));
+    check(await sb.storage.from(BUCKET).upload(thumbPath, thumb, opts));
+    const row = check(await sb.from('garage_photos').update({ path, thumb_path: thumbPath }).eq('id', photo.id).select().single());
+    await sb.storage.from(BUCKET).remove([photo.path, photo.thumbPath]); // best effort
+    const updated = toPhoto(row);
+    await cachePut('photos', [updated]);
+    await cacheDelete('blobs', [`p:${photo.path}`, `p:${photo.thumbPath}`]);
+    await tx(['blobs'], 'readwrite', (t) => {
+      t.objectStore('blobs').put(thumb, `p:${thumbPath}`);
+      t.objectStore('blobs').put(blob, `p:${path}`);
+    });
+    return updated;
+  });
 }
+
+// Saved copies are filed by storage path, which changes whenever a picture is replaced.
+const photoBlob = (photo, full) => pathBlob(full ? photo.path : photo.thumbPath);
 export const thumbBlob = (photo) => photoBlob(photo, false).catch(() => null);
 export const fullBlob = (photo) => photoBlob(photo, true);
 
